@@ -63,6 +63,12 @@ for any existing files it overwrites.
 
 ## Quick start
 
+One-line download + run from GitHub (replace `<OWNER>` with the repo owner):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/<OWNER>/Fedora-UKI-Script/main/uki-setup.sh | sudo bash
+```
+
 1. Clone this repository.
 2. Edit configuration values at the top of `uki-setup.sh` (especially `CMDLINE`).
 3. Run:
