@@ -8,7 +8,8 @@ jobs:
   fedora-checks:
     runs-on: ubuntu-latest
     container:
-      image: fedora:43
+      # Keep this pinned to a stable Fedora release so CI remains reproducible.
+      image: fedora:41
     steps:
       - uses: actions/checkout@v4
 
