@@ -1,0 +1,182 @@
+# Fedora UKI Setup Script
+
+`uki-setup.sh` automates creation and lifecycle management of **Unified Kernel Images (UKIs)** on Fedora and Fedora-based systems.
+
+It performs a one-time setup that:
+
+- Installs required tooling (`dracut`, `efibootmgr`, `binutils`, `systemd-boot-unsigned`).
+- Writes a UKI rebuild helper script to `/usr/local/sbin/uki-build.sh`.
+- Installs a `kernel-install` plugin that rebuilds/removes UKIs when kernels are added/removed.
+- Disables default Fedora kernel-install plugins that generate GRUB/BLS entries to avoid conflicts.
+- Builds and registers a UKI for the currently running kernel.
+
+---
+
+## What this is for
+
+A UKI bundles the kernel, initramfs, and kernel command line into one EFI executable. This can simplify boot flows and makes kernel updates predictable when combined with `kernel-install` hooks.
+
+This project is intended for systems booting in **UEFI mode** with a mounted **EFI System Partition (ESP)** (typically `/boot/efi`).
+
+---
+
+## Requirements
+
+- Fedora or Fedora-derived distribution.
+- UEFI boot mode.
+- Root privileges.
+- ESP mounted at `/boot/efi` or `/efi`.
+
+> [!WARNING]
+> This script modifies boot behavior and disables several default kernel-install plugins. Review the script and adapt configuration before use.
+
+---
+
+## Quick start
+
+1. Clone this repository.
+2. Edit configuration values at the top of `uki-setup.sh` (especially `CMDLINE`).
+3. Run:
+
+```bash
+sudo bash uki-setup.sh
+```
+
+After setup, future kernel install/remove operations should automatically update UKIs.
+
+---
+
+## Configuration options
+
+Configuration is in the **USER CONFIGURATION** section of `uki-setup.sh`.
+
+### `EFI_DIR`
+Directory on the ESP where UKIs are written.
+
+Default:
+
+```bash
+EFI_DIR="/boot/efi/EFI/Linux"
+```
+
+### `CMDLINE`
+Kernel command line embedded into the UKI.
+
+Default placeholder:
+
+```bash
+CMDLINE="rw quiet rhgb"
+```
+
+You should typically include your root device details (`root=UUID=...`, and any encryption/LVM/btrfs args needed by your setup).
+
+### `AUTO_DETECT_CMDLINE`
+When set to `1`, command line is derived from `/proc/cmdline` (with boot-loader-specific items removed).
+
+Default:
+
+```bash
+AUTO_DETECT_CMDLINE=0
+```
+
+### `EFI_STUB`
+Optional explicit path to the EFI stub used by dracut.
+
+Default:
+
+```bash
+EFI_STUB=""
+```
+
+Leave empty to auto-detect common Fedora paths.
+
+---
+
+## Files created by setup
+
+Running `uki-setup.sh` creates/updates:
+
+- `/usr/local/sbin/uki-build.sh` — manual/automated UKI rebuild helper.
+- `/usr/lib/kernel/install.d/90-uki-dracut.install` — kernel-install plugin.
+- `/etc/kernel/install.d/*.install -> /dev/null` overrides for selected default plugins.
+
+---
+
+## Manual operations
+
+### Rebuild UKI for current kernel
+
+```bash
+sudo /usr/local/sbin/uki-build.sh "$(uname -r)"
+```
+
+### Rebuild UKI for a specific installed kernel
+
+```bash
+sudo /usr/local/sbin/uki-build.sh 6.11.4-200.fc40.x86_64
+```
+
+### Check EFI boot entries
+
+```bash
+efibootmgr -v
+```
+
+### List generated UKIs
+
+```bash
+ls -lh /boot/efi/EFI/Linux/*.efi
+```
+
+---
+
+## Updating configuration after first run
+
+After initial setup, edit settings in:
+
+```bash
+/usr/local/sbin/uki-build.sh
+```
+
+The setup script templates values into this file during installation.
+
+---
+
+## Rollback / uninstall (manual)
+
+If you want to return to your previous boot flow, you can:
+
+1. Remove custom plugin and helper script:
+
+```bash
+sudo rm -f /usr/lib/kernel/install.d/90-uki-dracut.install
+sudo rm -f /usr/local/sbin/uki-build.sh
+```
+
+2. Remove override symlinks created by this setup:
+
+```bash
+sudo rm -f \
+  /etc/kernel/install.d/20-grub.install \
+  /etc/kernel/install.d/50-depmod.install \
+  /etc/kernel/install.d/90-loaderentry.install \
+  /etc/kernel/install.d/92-crashkernel.install \
+  /etc/kernel/install.d/95-kernel-install.install
+```
+
+3. Optionally delete generated UKIs from ESP and remove corresponding EFI entries with `efibootmgr`.
+
+---
+
+## Troubleshooting
+
+- **UEFI not detected**: Ensure firmware boot mode is UEFI and ESP is mounted.
+- **UKI fails to boot**: Re-check `CMDLINE` and storage-related boot args.
+- **Missing EFI stub**: Install `systemd-boot-unsigned` and verify stub path.
+- **No Secure Boot signing**: Install `sbsigntools`; this script only warns when absent.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
