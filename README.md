@@ -1,6 +1,6 @@
 # Fedora UKI Setup Script
 
-`uki-setup.sh` automates creation and lifecycle management of **Unified Kernel Images (UKIs)** on Fedora and Fedora-based systems.
+`uki-setup.sh` automates creation and lifecycle management of **Unified Kernel Images (UKIs)** on Fedora and other Linux systems that provide compatible `dracut` + `kernel-install` tooling.
 
 It performs a one-time setup that:
 
@@ -22,13 +22,42 @@ This project is intended for systems booting in **UEFI mode** with a mounted **E
 
 ## Requirements
 
-- Fedora or Fedora-derived distribution.
+- Linux distribution with `dracut`, `kernel-install`, and `efibootmgr` available.
 - UEFI boot mode.
 - Root privileges.
 - ESP mounted at `/boot/efi` or `/efi`.
 
-> [!WARNING]
-> This script modifies boot behavior and disables several default kernel-install plugins. Review the script and adapt configuration before use.
+> [!DANGER]
+> **Make a full system backup before running this script.** A tested restore path (snapshot rollback, rescue image, or offline backup) is strongly recommended.
+>
+> This script is **invasive and experimental**: it modifies bootloader behavior, writes kernel-install hooks, manages EFI entries, and disables default kernel-install plugins. A misconfiguration can leave your system unbootable.
+>
+> Only proceed if you understand your boot stack and are prepared to recover from a failed boot.
+
+---
+
+## Safety and backup-first workflow (recommended)
+
+Before setup:
+
+1. Create a full backup or snapshot of your current system.
+2. Confirm you have working rescue media.
+3. Record current EFI entries:
+
+```bash
+sudo efibootmgr -v
+```
+
+4. Confirm your root filesystem parameters (`root=UUID=...`, encryption/LVM args, etc.).
+5. Keep at least one known-good boot entry in firmware boot order until you've validated the new UKI boots.
+
+The setup script also creates local file backups under:
+
+```bash
+/var/backups/uki-setup/
+```
+
+for any existing files it overwrites.
 
 ---
 
@@ -43,6 +72,9 @@ sudo bash uki-setup.sh
 ```
 
 After setup, future kernel install/remove operations should automatically update UKIs.
+
+> [!NOTE]
+> The script auto-detects `dnf`, `apt`, `zypper`, or `pacman` and attempts to install needed dependencies with the detected package manager.
 
 ---
 
@@ -172,7 +204,7 @@ sudo rm -f \
 
 - **UEFI not detected**: Ensure firmware boot mode is UEFI and ESP is mounted.
 - **UKI fails to boot**: Re-check `CMDLINE` and storage-related boot args.
-- **Missing EFI stub**: Install `systemd-boot-unsigned` and verify stub path.
+- **Missing EFI stub**: Install your distro's systemd-boot package and verify stub path.
 - **No Secure Boot signing**: Install `sbsigntools`; this script only warns when absent.
 
 ---

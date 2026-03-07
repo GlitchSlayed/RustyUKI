@@ -57,6 +57,9 @@ EFI_STUB=""   # e.g. "/usr/lib/systemd/boot/efi/linuxx64.efi.stub"
 SELF="$(realpath "$0")"
 BUILD_SCRIPT="/usr/local/sbin/uki-build.sh"
 INSTALL_PLUGIN="/usr/lib/kernel/install.d/90-uki-dracut.install"
+BACKUP_ROOT="/var/backups/uki-setup"
+PKG_MGR=""
+PKG_INSTALL_CMD=()
 
 # Colour helpers
 _c() { printf '\e[%sm' "$1"; }
@@ -65,6 +68,59 @@ info()  { echo "${GRN}${BLD}[uki]${RST}  $*"; }
 warn()  { echo "${YLW}${BLD}[warn]${RST} $*" >&2; }
 die()   { echo "${RED}${BLD}[err]${RST}  $*" >&2; exit 1; }
 hr()    { echo "──────────────────────────────────────────────────────────────"; }
+require_cmd() { command -v "$1" &>/dev/null || die "Required command missing: $1"; }
+
+backup_path() {
+    local src="$1"
+    [[ -e "$src" || -L "$src" ]] || return 0
+    local ts backup_dir backup
+    ts="$(date +%Y%m%d-%H%M%S)"
+    backup_dir="${BACKUP_ROOT}/${ts}"
+    backup="${backup_dir}${src}"
+    mkdir -p "$(dirname "$backup")"
+    cp -a "$src" "$backup"
+    info "Backed up ${src} -> ${backup}"
+}
+
+detect_package_manager() {
+    if command -v dnf &>/dev/null; then
+        PKG_MGR="dnf"
+        PKG_INSTALL_CMD=(dnf install -y)
+    elif command -v apt-get &>/dev/null; then
+        PKG_MGR="apt"
+        PKG_INSTALL_CMD=(apt-get install -y)
+    elif command -v zypper &>/dev/null; then
+        PKG_MGR="zypper"
+        PKG_INSTALL_CMD=(zypper --non-interactive install)
+    elif command -v pacman &>/dev/null; then
+        PKG_MGR="pacman"
+        PKG_INSTALL_CMD=(pacman --noconfirm -S)
+    else
+        PKG_MGR=""
+    fi
+}
+
+ensure_packages() {
+    local missing=()
+    local p
+    for p in "$@"; do
+        case "$PKG_MGR" in
+            dnf|zypper) rpm -q "$p" &>/dev/null || missing+=("$p") ;;
+            apt) dpkg -s "$p" &>/dev/null || missing+=("$p") ;;
+            pacman) pacman -Q "$p" &>/dev/null || missing+=("$p") ;;
+            *) missing+=("$p") ;;
+        esac
+    done
+
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        info "All required packages already installed."
+        return 0
+    fi
+
+    [[ -n "$PKG_MGR" ]] || die "No supported package manager found. Install dependencies manually: ${missing[*]}"
+    info "Installing missing packages via ${PKG_MGR}: ${missing[*]}"
+    "${PKG_INSTALL_CMD[@]}" "${missing[@]}" || die "Dependency installation failed via ${PKG_MGR}."
+}
 
 # =============================================================================
 # PHASE 1 — Preflight checks
@@ -75,6 +131,13 @@ phase_preflight() {
     info "Phase 1: Preflight checks"
 
     [[ $EUID -eq 0 ]] || die "Must be run as root (sudo bash $SELF)"
+
+    detect_package_manager
+    require_cmd findmnt
+    require_cmd lsblk
+    require_cmd sed
+    require_cmd awk
+    require_cmd xargs
 
     # Verify we are on a Fedora-family system
     if [[ -f /etc/os-release ]]; then
@@ -93,7 +156,9 @@ phase_preflight() {
     findmnt /efi      &>/dev/null       && uefi_detected=1
     [[ -d /boot/efi/EFI ]]              && uefi_detected=1
     [[ -d /efi/EFI    ]]                && uefi_detected=1
-    efibootmgr &>/dev/null 2>&1         && uefi_detected=1
+    if command -v efibootmgr &>/dev/null && efibootmgr &>/dev/null 2>&1; then
+        uefi_detected=1
+    fi
 
     if [[ $uefi_detected -eq 0 ]]; then
         warn "Could not confirm UEFI environment via any detection method."
@@ -120,17 +185,23 @@ phase_deps() {
 
     local pkgs=(dracut efibootmgr binutils)
 
-    # systemd-boot EFI stub — needed by dracut --uefi
-    # On Fedora the stub is in the 'systemd-boot-unsigned' package
-    pkgs+=(systemd-boot-unsigned)
+    case "$PKG_MGR" in
+        dnf) pkgs+=(systemd-boot-unsigned) ;;
+        apt) pkgs+=(systemd-boot-efi) ;;
+        zypper) pkgs+=(systemd-boot) ;;
+        pacman) pkgs+=(systemd) ;;
+        *) warn "Unknown package manager. Will verify commands without package installs." ;;
+    esac
 
-    # sbsigntools is optional (Secure Boot signing) — don't abort if missing
-    info "Installing: ${pkgs[*]}"
-    dnf install -y "${pkgs[@]}" || die "dnf install failed."
+    ensure_packages "${pkgs[@]}"
+
+    require_cmd dracut
+    require_cmd efibootmgr
+    dracut --help | grep -q -- '--uefi' || die "Installed dracut does not support --uefi"
 
     if ! command -v sbsign &>/dev/null; then
         warn "sbsigntools not installed — UKIs will not be Secure Boot signed."
-        warn "Install later with: sudo dnf install sbsigntools"
+        warn "Install later using your package manager (package often named 'sbsigntools')."
     fi
 }
 
@@ -143,6 +214,7 @@ phase_write_build_script() {
     info "Phase 3: Writing build script → ${BUILD_SCRIPT}"
 
     mkdir -p "$(dirname "$BUILD_SCRIPT")"
+    backup_path "$BUILD_SCRIPT"
 
     cat > "$BUILD_SCRIPT" <<'BUILDBODY'
 #!/bin/bash
@@ -163,12 +235,17 @@ RED='\e[31;1m'; GRN='\e[32;1m'; YLW='\e[33;1m'; RST='\e[0m'
 info()  { echo -e "${GRN}[uki-build]${RST} $*"; }
 warn()  { echo -e "${YLW}[uki-build]${RST} $*" >&2; }
 die()   { echo -e "${RED}[uki-build]${RST} $*" >&2; exit 1; }
+require_cmd() { command -v "$1" &>/dev/null || die "Required command missing: $1"; }
 
 KERNEL_VER="${1:-$(uname -r)}"
 KERNEL_IMG="/lib/modules/${KERNEL_VER}/vmlinuz"
 UKI_OUT="${EFI_DIR}/linux-${KERNEL_VER}.efi"
 
 [[ $EUID -eq 0 ]] || die "Must run as root."
+require_cmd dracut
+require_cmd findmnt
+require_cmd lsblk
+require_cmd efibootmgr
 [[ -f "$KERNEL_IMG" ]] || die "Kernel image not found: ${KERNEL_IMG}"
 mkdir -p "$EFI_DIR"
 
@@ -193,7 +270,7 @@ if [[ -z "$EFI_STUB" ]]; then
         fi
     done
 fi
-[[ -f "${EFI_STUB:-}" ]] || die "EFI stub not found. Install systemd-boot-unsigned:\n  sudo dnf install systemd-boot-unsigned"
+[[ -f "${EFI_STUB:-}" ]] || die "EFI stub not found. Install your distro package for systemd-boot EFI stub."
 info "EFI stub: ${EFI_STUB}"
 
 # Build dracut arguments
@@ -234,7 +311,7 @@ REL_PATH_BS="${REL_PATH//\//\\}"            # forward→backslash
 # Remove any existing entry with the same label
 OLD_NUM=$(efibootmgr 2>/dev/null \
     | grep -F "* ${LABEL}" \
-    | grep -oP 'Boot\K[0-9A-Fa-f]+' \
+    | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\).*/\1/p' \
     || true)
 if [[ -n "$OLD_NUM" ]]; then
     info "Removing stale EFI entry Boot${OLD_NUM}…"
@@ -273,6 +350,7 @@ phase_write_plugin() {
     info "Phase 4: Writing kernel-install plugin → ${INSTALL_PLUGIN}"
 
     mkdir -p "$(dirname "$INSTALL_PLUGIN")"
+    backup_path "$INSTALL_PLUGIN"
 
     cat > "$INSTALL_PLUGIN" <<PLUGINBODY
 #!/bin/bash
@@ -306,7 +384,7 @@ case "\$COMMAND" in
         LABEL="Linux UKI \${KERNEL_VER}"
         BOOT_NUM=\$(efibootmgr 2>/dev/null \
             | grep -F "* \${LABEL}" \
-            | grep -oP 'Boot\K[0-9A-Fa-f]+' || true)
+            | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\).*/\1/p' || true)
         if [[ -n "\$BOOT_NUM" ]]; then
             efibootmgr --quiet --bootnum "\$BOOT_NUM" --delete-bootnum \
                 && log "Removed EFI entry Boot\${BOOT_NUM}"
@@ -348,6 +426,7 @@ phase_disable_bls_plugins() {
 
     for p in "${plugins[@]}"; do
         local target="/etc/kernel/install.d/${p}"
+        backup_path "$target"
         if [[ ! -e "$target" ]]; then
             ln -s /dev/null "$target"
             info "  Disabled: ${p}"
@@ -403,6 +482,8 @@ phase_summary() {
     echo ""
     echo "  To rebuild manually:"
     echo "    sudo ${BUILD_SCRIPT} \$(uname -r)"
+    echo ""
+    echo "  Backups created under: ${BACKUP_ROOT}/"
     echo ""
     warn "Reboot only after confirming the cmdline in ${BUILD_SCRIPT} is correct!"
     hr
