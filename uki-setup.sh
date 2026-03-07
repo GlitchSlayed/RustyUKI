@@ -471,7 +471,7 @@ phase_summary() {
     echo "    ${INSTALL_PLUGIN} ← auto-trigger on kernel installs"
     echo ""
     echo "  UKIs are stored in: ${EFI_DIR}/"
-    ls -lh "${EFI_DIR}/"*.efi 2>/dev/null | sed 's/^/    /' || true
+    find "${EFI_DIR}" -maxdepth 1 -type f -name "*.efi" -exec ls -lh {} + 2>/dev/null | sed 's/^/    /' || true
     echo ""
     echo "  Current UEFI boot entries:"
     efibootmgr -v 2>/dev/null | grep -E 'BootOrder|Boot[0-9A-Fa-f]{4}' | sed 's/^/    /' || true
@@ -493,10 +493,12 @@ phase_summary() {
 # Main
 # =============================================================================
 
-phase_preflight
-phase_deps
-phase_write_build_script
-phase_write_plugin
-phase_disable_bls_plugins
-phase_initial_build
-phase_summary
+if [[ "${UKI_SETUP_SKIP_MAIN:-0}" -ne 1 ]]; then
+    phase_preflight
+    phase_deps
+    phase_write_build_script
+    phase_write_plugin
+    phase_disable_bls_plugins
+    phase_initial_build
+    phase_summary
+fi

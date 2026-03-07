@@ -124,6 +124,25 @@ Leave empty to auto-detect common Fedora paths.
 
 ---
 
+
+## Continuous integration checks
+
+GitHub Actions now runs checks in a Fedora container (`fedora:41`) on every push and pull request. The workflow verifies:
+
+- Bash syntax for `uki-setup.sh` and test scripts.
+- `shellcheck` linting.
+- A project check script that sources `uki-setup.sh` with `UKI_SETUP_SKIP_MAIN=1` and validates the generated helper/plugin templates.
+
+Run the same checks locally with:
+
+```bash
+bash -n uki-setup.sh tests/test_uki_setup.sh
+shellcheck -P . uki-setup.sh tests/test_uki_setup.sh
+bash tests/test_uki_setup.sh
+```
+
+---
+
 ## Files created by setup
 
 Running `uki-setup.sh` creates/updates:
