@@ -1,0 +1,35 @@
+name: checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  fedora-checks:
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:41
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install check dependencies
+        run: |
+          dnf install -y \
+            bash \
+            coreutils \
+            diffutils \
+            findutils \
+            grep \
+            sed \
+            util-linux \
+            which \
+            shellcheck
+
+      - name: Bash syntax checks
+        run: bash -n uki-setup.sh tests/test_uki_setup.sh
+
+      - name: ShellCheck
+        run: shellcheck uki-setup.sh tests/test_uki_setup.sh
+
+      - name: Project checks
+        run: bash tests/test_uki_setup.sh

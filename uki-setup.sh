@@ -493,10 +493,12 @@ phase_summary() {
 # Main
 # =============================================================================
 
-phase_preflight
-phase_deps
-phase_write_build_script
-phase_write_plugin
-phase_disable_bls_plugins
-phase_initial_build
-phase_summary
+if [[ "${UKI_SETUP_SKIP_MAIN:-0}" -ne 1 ]]; then
+    phase_preflight
+    phase_deps
+    phase_write_build_script
+    phase_write_plugin
+    phase_disable_bls_plugins
+    phase_initial_build
+    phase_summary
+fi
