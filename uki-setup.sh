@@ -70,16 +70,46 @@ die()   { echo "${RED}${BLD}[err]${RST}  $*" >&2; exit 1; }
 hr()    { echo "──────────────────────────────────────────────────────────────"; }
 require_cmd() { command -v "$1" &>/dev/null || die "Required command missing: $1"; }
 
+ESP_MOUNT_CANDIDATES=(
+    /boot/efi
+    /efi
+    /boot
+    /boot/EFI
+    /esp
+)
+
 find_esp_device() {
     # GPT ESP type GUID: c12a7328-f81f-11d2-ba4b-00a0c93ec93b
     lsblk -pnro PATH,PARTTYPE,FSTYPE 2>/dev/null \
         | awk '$2=="c12a7328-f81f-11d2-ba4b-00a0c93ec93b" && tolower($3) ~ /fat|vfat/ {print $1; exit}'
 }
 
+find_mounted_esp_target() {
+    local candidate target fstype
+
+    for candidate in "${ESP_MOUNT_CANDIDATES[@]}"; do
+        target="$(findmnt -n -o TARGET "$candidate" 2>/dev/null || true)"
+        [[ -n "$target" ]] || continue
+
+        fstype="$(findmnt -n -o FSTYPE --target "$target" 2>/dev/null || true)"
+        [[ "$fstype" =~ ^(vfat|fat|msdos)$ ]] || continue
+        [[ -d "$target/EFI" ]] || continue
+
+        echo "$target"
+        return 0
+    done
+
+    while read -r target; do
+        [[ -n "$target" ]] && { echo "$target"; return 0; }
+    done < <(findmnt -rn -t vfat,fat -o TARGET 2>/dev/null | awk '$1 ~ /^\// && system("test -d " $1 "/EFI") == 0 {print $1}')
+
+    return 1
+}
+
 ensure_esp_mounted() {
     local esp_mount="" esp_dev="" candidate
 
-    esp_mount="$(findmnt -n -o TARGET /boot/efi 2>/dev/null || findmnt -n -o TARGET /efi 2>/dev/null || true)"
+    esp_mount="$(find_mounted_esp_target || true)"
     if [[ -n "$esp_mount" ]]; then
         info "ESP mounted at ${esp_mount}."
         return 0
@@ -88,7 +118,7 @@ ensure_esp_mounted() {
     warn "ESP not currently mounted. Attempting automatic mount..."
 
     # First try fstab-based mount by mount point.
-    for candidate in /boot/efi /efi; do
+    for candidate in "${ESP_MOUNT_CANDIDATES[@]}"; do
         mkdir -p "$candidate"
         if mount "$candidate" &>/dev/null && findmnt "$candidate" &>/dev/null; then
             info "Mounted ESP at ${candidate} using fstab entry."
@@ -99,16 +129,13 @@ ensure_esp_mounted() {
     # Fallback: detect the ESP partition and mount directly.
     esp_dev="$(find_esp_device || true)"
     if [[ -n "$esp_dev" ]]; then
-        if [[ -d /boot ]]; then
-            candidate="/boot/efi"
-        else
-            candidate="/efi"
-        fi
-        mkdir -p "$candidate"
-        if mount -t vfat "$esp_dev" "$candidate" &>/dev/null && findmnt "$candidate" &>/dev/null; then
-            info "Mounted ESP device ${esp_dev} at ${candidate}."
-            return 0
-        fi
+        for candidate in "${ESP_MOUNT_CANDIDATES[@]}"; do
+            mkdir -p "$candidate"
+            if mount -t vfat "$esp_dev" "$candidate" &>/dev/null && findmnt "$candidate" &>/dev/null; then
+                info "Mounted ESP device ${esp_dev} at ${candidate}."
+                return 0
+            fi
+        done
     fi
 
     return 1
@@ -213,7 +240,7 @@ phase_preflight() {
         info "UEFI environment confirmed."
     fi
 
-    ensure_esp_mounted || die "ESP not mounted at /boot/efi or /efi and automatic mount failed. Mount it manually, then re-run."
+    ensure_esp_mounted || die "ESP is not mounted and automatic mount failed. Checked: ${ESP_MOUNT_CANDIDATES[*]}. Mount it manually, then re-run."
 }
 
 # =============================================================================
@@ -278,22 +305,52 @@ warn()  { echo -e "${YLW}[uki-build]${RST} $*" >&2; }
 die()   { echo -e "${RED}[uki-build]${RST} $*" >&2; exit 1; }
 require_cmd() { command -v "$1" &>/dev/null || die "Required command missing: $1"; }
 
+ESP_MOUNT_CANDIDATES=(
+    /boot/efi
+    /efi
+    /boot
+    /boot/EFI
+    /esp
+)
+
 find_esp_device() {
     lsblk -pnro PATH,PARTTYPE,FSTYPE 2>/dev/null \
         | awk '$2=="c12a7328-f81f-11d2-ba4b-00a0c93ec93b" && tolower($3) ~ /fat|vfat/ {print $1; exit}'
 }
 
+find_mounted_esp_target() {
+    local candidate target fstype
+
+    for candidate in "${ESP_MOUNT_CANDIDATES[@]}"; do
+        target=$(findmnt -n -o TARGET "$candidate" 2>/dev/null || true)
+        [[ -n "$target" ]] || continue
+
+        fstype=$(findmnt -n -o FSTYPE --target "$target" 2>/dev/null || true)
+        [[ "$fstype" =~ ^(vfat|fat|msdos)$ ]] || continue
+        [[ -d "$target/EFI" ]] || continue
+
+        echo "$target"
+        return 0
+    done
+
+    while read -r target; do
+        [[ -n "$target" ]] && { echo "$target"; return 0; }
+    done < <(findmnt -rn -t vfat,fat -o TARGET 2>/dev/null | awk '$1 ~ /^\// && system("test -d " $1 "/EFI") == 0 {print $1}')
+
+    return 1
+}
+
 ensure_esp_mounted() {
     local esp_mount="" esp_dev="" candidate
 
-    esp_mount=$(findmnt -n -o TARGET /boot/efi 2>/dev/null || findmnt -n -o TARGET /efi 2>/dev/null || true)
+    esp_mount=$(find_mounted_esp_target || true)
     if [[ -n "$esp_mount" ]]; then
         info "ESP mounted at ${esp_mount}"
         return 0
     fi
 
     warn "ESP not mounted. Attempting automatic mount..."
-    for candidate in /boot/efi /efi; do
+    for candidate in "${ESP_MOUNT_CANDIDATES[@]}"; do
         mkdir -p "$candidate"
         if mount "$candidate" &>/dev/null && findmnt "$candidate" &>/dev/null; then
             info "Mounted ESP at ${candidate} using fstab entry"
@@ -303,13 +360,13 @@ ensure_esp_mounted() {
 
     esp_dev=$(find_esp_device || true)
     if [[ -n "$esp_dev" ]]; then
-        candidate="/boot/efi"
-        [[ -d /boot ]] || candidate="/efi"
-        mkdir -p "$candidate"
-        if mount -t vfat "$esp_dev" "$candidate" &>/dev/null && findmnt "$candidate" &>/dev/null; then
-            info "Mounted ESP device ${esp_dev} at ${candidate}"
-            return 0
-        fi
+        for candidate in "${ESP_MOUNT_CANDIDATES[@]}"; do
+            mkdir -p "$candidate"
+            if mount -t vfat "$esp_dev" "$candidate" &>/dev/null && findmnt "$candidate" &>/dev/null; then
+                info "Mounted ESP device ${esp_dev} at ${candidate}"
+                return 0
+            fi
+        done
     fi
 
     return 1
@@ -326,7 +383,7 @@ require_cmd lsblk
 require_cmd efibootmgr
 [[ -f "$KERNEL_IMG" ]] || die "Kernel image not found: ${KERNEL_IMG}"
 mkdir -p "$EFI_DIR"
-ensure_esp_mounted || die "ESP is not mounted and automatic mount failed."
+ensure_esp_mounted || die "ESP is not mounted and automatic mount failed. Checked: ${ESP_MOUNT_CANDIDATES[*]}"
 
 # Build effective cmdline
 if [[ "$AUTO_DETECT_CMDLINE" -eq 1 ]]; then
@@ -373,7 +430,7 @@ info "UKI built successfully: ${UKI_OUT} ($(du -sh "$UKI_OUT" | cut -f1))"
 LABEL="Linux UKI ${KERNEL_VER}"
 
 # Determine ESP mount point, disk, and partition number
-ESP_MOUNT=$(findmnt -n -o TARGET /boot/efi 2>/dev/null || findmnt -n -o TARGET /efi 2>/dev/null) \
+ESP_MOUNT=$(find_mounted_esp_target) \
     || { warn "Cannot detect ESP mount — skipping efibootmgr."; exit 0; }
 ESP_DEV=$(findmnt -n -o SOURCE "$ESP_MOUNT") \
     || { warn "Cannot detect ESP device — skipping efibootmgr."; exit 0; }

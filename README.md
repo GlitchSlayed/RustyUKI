@@ -25,7 +25,7 @@ This project is intended for systems booting in **UEFI mode** with a mounted **E
 - Linux distribution with `dracut`, `kernel-install`, and `efibootmgr` available.
 - UEFI boot mode.
 - Root privileges.
-- ESP mounted at `/boot/efi` or `/efi` (the script now attempts to auto-mount it when possible).
+- ESP mounted at one of `/boot/efi`, `/efi`, `/boot`, `/boot/EFI`, or `/esp` (the script attempts automatic ESP discovery/mounting).
 
 > [!DANGER]
 > **Make a full system backup before running this script.** A tested restore path (snapshot rollback, rescue image, or offline backup) is strongly recommended.
@@ -228,7 +228,7 @@ sudo rm -f \
 ## Troubleshooting
 
 - **UEFI not detected**: Ensure firmware boot mode is UEFI and that `efivars`/ESP are accessible.
-- **ESP not mounted**: The script now tries to mount `/boot/efi` or `/efi` automatically (via fstab first, then ESP partition detection). If that still fails, mount it manually and rerun.
+- **ESP not mounted**: The script now checks `/boot/efi`, `/efi`, `/boot`, `/boot/EFI`, and `/esp`, then attempts automatic mounting (via fstab first, then ESP partition detection). If that still fails, mount it manually and rerun.
 - **UKI fails to boot**: Re-check `CMDLINE` and storage-related boot args.
 - **Missing EFI stub**: Install your distro's systemd-boot package and verify stub path.
 - **No Secure Boot signing**: Install `sbsigntools`; this script only warns when absent.
