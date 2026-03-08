@@ -85,11 +85,18 @@ find_esp_device() {
 }
 
 find_mounted_esp_target() {
-    local candidate target
+    local candidate target fstype
 
     for candidate in "${ESP_MOUNT_CANDIDATES[@]}"; do
         target="$(findmnt -n -o TARGET "$candidate" 2>/dev/null || true)"
-        [[ -n "$target" ]] && { echo "$target"; return 0; }
+        [[ -n "$target" ]] || continue
+
+        fstype="$(findmnt -n -o FSTYPE --target "$target" 2>/dev/null || true)"
+        [[ "$fstype" =~ ^(vfat|fat|msdos)$ ]] || continue
+        [[ -d "$target/EFI" ]] || continue
+
+        echo "$target"
+        return 0
     done
 
     while read -r target; do
@@ -312,11 +319,18 @@ find_esp_device() {
 }
 
 find_mounted_esp_target() {
-    local candidate target
+    local candidate target fstype
 
     for candidate in "${ESP_MOUNT_CANDIDATES[@]}"; do
         target=$(findmnt -n -o TARGET "$candidate" 2>/dev/null || true)
-        [[ -n "$target" ]] && { echo "$target"; return 0; }
+        [[ -n "$target" ]] || continue
+
+        fstype=$(findmnt -n -o FSTYPE --target "$target" 2>/dev/null || true)
+        [[ "$fstype" =~ ^(vfat|fat|msdos)$ ]] || continue
+        [[ -d "$target/EFI" ]] || continue
+
+        echo "$target"
+        return 0
     done
 
     while read -r target; do
