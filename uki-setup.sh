@@ -70,6 +70,50 @@ die()   { echo "${RED}${BLD}[err]${RST}  $*" >&2; exit 1; }
 hr()    { echo "──────────────────────────────────────────────────────────────"; }
 require_cmd() { command -v "$1" &>/dev/null || die "Required command missing: $1"; }
 
+find_esp_device() {
+    # GPT ESP type GUID: c12a7328-f81f-11d2-ba4b-00a0c93ec93b
+    lsblk -pnro PATH,PARTTYPE,FSTYPE 2>/dev/null \
+        | awk '$2=="c12a7328-f81f-11d2-ba4b-00a0c93ec93b" && tolower($3) ~ /fat|vfat/ {print $1; exit}'
+}
+
+ensure_esp_mounted() {
+    local esp_mount="" esp_dev="" candidate
+
+    esp_mount="$(findmnt -n -o TARGET /boot/efi 2>/dev/null || findmnt -n -o TARGET /efi 2>/dev/null || true)"
+    if [[ -n "$esp_mount" ]]; then
+        info "ESP mounted at ${esp_mount}."
+        return 0
+    fi
+
+    warn "ESP not currently mounted. Attempting automatic mount..."
+
+    # First try fstab-based mount by mount point.
+    for candidate in /boot/efi /efi; do
+        mkdir -p "$candidate"
+        if mount "$candidate" &>/dev/null && findmnt "$candidate" &>/dev/null; then
+            info "Mounted ESP at ${candidate} using fstab entry."
+            return 0
+        fi
+    done
+
+    # Fallback: detect the ESP partition and mount directly.
+    esp_dev="$(find_esp_device || true)"
+    if [[ -n "$esp_dev" ]]; then
+        if [[ -d /boot ]]; then
+            candidate="/boot/efi"
+        else
+            candidate="/efi"
+        fi
+        mkdir -p "$candidate"
+        if mount -t vfat "$esp_dev" "$candidate" &>/dev/null && findmnt "$candidate" &>/dev/null; then
+            info "Mounted ESP device ${esp_dev} at ${candidate}."
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
 backup_path() {
     local src="$1"
     [[ -e "$src" || -L "$src" ]] || return 0
@@ -169,10 +213,7 @@ phase_preflight() {
         info "UEFI environment confirmed."
     fi
 
-    # Verify ESP is mounted
-    if ! findmnt /boot/efi &>/dev/null && ! findmnt /efi &>/dev/null; then
-        die "ESP not mounted at /boot/efi or /efi. Mount it first."
-    fi
+    ensure_esp_mounted || die "ESP not mounted at /boot/efi or /efi and automatic mount failed. Mount it manually, then re-run."
 }
 
 # =============================================================================
@@ -237,6 +278,43 @@ warn()  { echo -e "${YLW}[uki-build]${RST} $*" >&2; }
 die()   { echo -e "${RED}[uki-build]${RST} $*" >&2; exit 1; }
 require_cmd() { command -v "$1" &>/dev/null || die "Required command missing: $1"; }
 
+find_esp_device() {
+    lsblk -pnro PATH,PARTTYPE,FSTYPE 2>/dev/null \
+        | awk '$2=="c12a7328-f81f-11d2-ba4b-00a0c93ec93b" && tolower($3) ~ /fat|vfat/ {print $1; exit}'
+}
+
+ensure_esp_mounted() {
+    local esp_mount="" esp_dev="" candidate
+
+    esp_mount=$(findmnt -n -o TARGET /boot/efi 2>/dev/null || findmnt -n -o TARGET /efi 2>/dev/null || true)
+    if [[ -n "$esp_mount" ]]; then
+        info "ESP mounted at ${esp_mount}"
+        return 0
+    fi
+
+    warn "ESP not mounted. Attempting automatic mount..."
+    for candidate in /boot/efi /efi; do
+        mkdir -p "$candidate"
+        if mount "$candidate" &>/dev/null && findmnt "$candidate" &>/dev/null; then
+            info "Mounted ESP at ${candidate} using fstab entry"
+            return 0
+        fi
+    done
+
+    esp_dev=$(find_esp_device || true)
+    if [[ -n "$esp_dev" ]]; then
+        candidate="/boot/efi"
+        [[ -d /boot ]] || candidate="/efi"
+        mkdir -p "$candidate"
+        if mount -t vfat "$esp_dev" "$candidate" &>/dev/null && findmnt "$candidate" &>/dev/null; then
+            info "Mounted ESP device ${esp_dev} at ${candidate}"
+            return 0
+        fi
+    fi
+
+    return 1
+}
+
 KERNEL_VER="${1:-$(uname -r)}"
 KERNEL_IMG="/lib/modules/${KERNEL_VER}/vmlinuz"
 UKI_OUT="${EFI_DIR}/linux-${KERNEL_VER}.efi"
@@ -248,6 +326,7 @@ require_cmd lsblk
 require_cmd efibootmgr
 [[ -f "$KERNEL_IMG" ]] || die "Kernel image not found: ${KERNEL_IMG}"
 mkdir -p "$EFI_DIR"
+ensure_esp_mounted || die "ESP is not mounted and automatic mount failed."
 
 # Build effective cmdline
 if [[ "$AUTO_DETECT_CMDLINE" -eq 1 ]]; then
