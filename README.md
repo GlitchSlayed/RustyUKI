@@ -25,7 +25,7 @@ This project is intended for systems booting in **UEFI mode** with a mounted **E
 - Linux distribution with `dracut`, `kernel-install`, and `efibootmgr` available.
 - UEFI boot mode.
 - Root privileges.
-- ESP mounted at `/boot/efi` or `/efi`.
+- ESP mounted at one of `/boot/efi`, `/efi`, `/boot`, `/boot/EFI`, or `/esp` (the script attempts automatic ESP discovery/mounting).
 
 > [!DANGER]
 > **Make a full system backup before running this script.** A tested restore path (snapshot rollback, rescue image, or offline backup) is strongly recommended.
@@ -63,8 +63,14 @@ for any existing files it overwrites.
 
 ## Quick start
 
+One-line download + run from GitHub:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/GlitchSlayed/Fedora-UKI-Script/main/uki-setup.sh | sudo bash
+```
+
 1. Clone this repository.
-2. Edit configuration values at the top of `uki-setup.sh` (especially `CMDLINE`).
+2. Optionally review configuration values at the top of `uki-setup.sh` (`AUTO_DETECT_CMDLINE` is enabled by default, while `CMDLINE` remains a manual fallback).
 3. Run:
 
 ```bash
@@ -94,21 +100,27 @@ EFI_DIR="/boot/efi/EFI/Linux"
 ### `CMDLINE`
 Kernel command line embedded into the UKI.
 
-Default placeholder:
+Default fallback value:
 
 ```bash
-CMDLINE="rw quiet rhgb"
+CMDLINE="root=UUID=REPLACE-ME rw quiet rhgb"
 ```
 
-You should typically include your root device details (`root=UUID=...`, and any encryption/LVM/btrfs args needed by your setup).
+This is only used when auto-detection is disabled or cannot find a usable bootable cmdline. Set it to your own known-good manual value as a backup.
 
 ### `AUTO_DETECT_CMDLINE`
-When set to `1`, command line is derived from `/proc/cmdline` (with boot-loader-specific items removed).
+When set to `1`, command line is auto-detected in this order:
+
+1. `/proc/cmdline` (current running boot)
+2. `/etc/kernel/cmdline`
+3. `GRUB_CMDLINE_LINUX` from `/etc/default/grub` and `/etc/default/grub.d/*.cfg`
+
+If none of these provide a bootable command line (for example one containing `root=`), the script falls back to `CMDLINE`.
 
 Default:
 
 ```bash
-AUTO_DETECT_CMDLINE=0
+AUTO_DETECT_CMDLINE=1
 ```
 
 ### `EFI_STUB`
@@ -221,7 +233,8 @@ sudo rm -f \
 
 ## Troubleshooting
 
-- **UEFI not detected**: Ensure firmware boot mode is UEFI and ESP is mounted.
+- **UEFI not detected**: Ensure firmware boot mode is UEFI and that `efivars`/ESP are accessible.
+- **ESP not mounted**: The script now checks `/boot/efi`, `/efi`, `/boot`, `/boot/EFI`, and `/esp`, then attempts automatic mounting (via fstab first, then ESP partition detection). If that still fails, mount it manually and rerun.
 - **UKI fails to boot**: Re-check `CMDLINE` and storage-related boot args.
 - **Missing EFI stub**: Install your distro's systemd-boot package and verify stub path.
 - **No Secure Boot signing**: Install `sbsigntools`; this script only warns when absent.
