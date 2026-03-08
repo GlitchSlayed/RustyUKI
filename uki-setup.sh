@@ -24,7 +24,7 @@ set -euo pipefail
 EFI_DIR="/boot/efi/EFI/Linux"
 
 # Kernel command-line embedded into the UKI.
-# !! EDIT THIS before running setup !!
+# This acts as a manual fallback if auto-detection cannot find a usable value.
 #
 # Find your root UUID with:  lsblk -f   or   blkid
 #
@@ -38,12 +38,15 @@ EFI_DIR="/boot/efi/EFI/Linux"
 #   LUKS full-disk encryption:
 #     CMDLINE="rd.luks.uuid=xxxx rd.lvm.lv=fedora/root root=/dev/mapper/fedora-root rw quiet rhgb"
 #
-CMDLINE="rw quiet rhgb"
+CMDLINE="root=UUID=REPLACE-ME rw quiet rhgb"
 
-# Set to 1 to auto-detect the cmdline from the currently running system
-# (reads /proc/cmdline, strips loader-specific tokens like BOOT_IMAGE=).
-# Useful when you are unsure of the exact parameters needed.
-AUTO_DETECT_CMDLINE=0
+# Set to 1 to auto-detect cmdline automatically.
+# Detection order:
+#   1) /proc/cmdline (current boot)
+#   2) /etc/kernel/cmdline
+#   3) GRUB_CMDLINE_LINUX from /etc/default/grub or /etc/default/grub.d/*.cfg
+# If all of the above fail, falls back to CMDLINE.
+AUTO_DETECT_CMDLINE=1
 
 # Path to the systemd-boot EFI stub used by dracut --uefi.
 # Fedora ships this in systemd-boot-unsigned or systemd.
@@ -69,6 +72,66 @@ warn()  { echo "${YLW}${BLD}[warn]${RST} $*" >&2; }
 die()   { echo "${RED}${BLD}[err]${RST}  $*" >&2; exit 1; }
 hr()    { echo "──────────────────────────────────────────────────────────────"; }
 require_cmd() { command -v "$1" &>/dev/null || die "Required command missing: $1"; }
+
+sanitize_cmdline() {
+    sed -E 's/(^| )BOOT_IMAGE=[^ ]*//g; s/(^| )initrd=[^ ]*//g; s/(^| )rd\.driver\.blacklist=[^ ]*//g; s/  +/ /g; s/^ //; s/ $//'
+}
+
+read_grub_cmdline() {
+    local file line value
+
+    for file in /etc/default/grub /etc/default/grub.d/*.cfg; do
+        [[ -f "$file" ]] || continue
+        while IFS= read -r line; do
+            [[ "$line" =~ ^[[:space:]]*# ]] && continue
+            if [[ "$line" =~ GRUB_CMDLINE_LINUX[[:space:]]*= ]]; then
+                value=$(printf '%s\n' "$line" | sed -n 's/^[[:space:]]*GRUB_CMDLINE_LINUX[[:space:]]*=[[:space:]]*"\\(.*\\)"[[:space:]]*$/\\1/p')
+                [[ -z "$value" ]] && value=$(printf '%s\n' "$line" | sed -n "s/^[[:space:]]*GRUB_CMDLINE_LINUX[[:space:]]*=[[:space:]]*'\\(.*\\)'[[:space:]]*$/\\1/p")
+                [[ -n "$value" ]] && { echo "$value"; return 0; }
+            fi
+        done < "$file"
+    done
+
+    return 1
+}
+
+get_effective_cmdline() {
+    local proc_cmdline kernel_cmdline grub_cmdline
+
+    if [[ "$AUTO_DETECT_CMDLINE" -eq 1 ]]; then
+        if [[ -r /proc/cmdline ]]; then
+            proc_cmdline=$(sanitize_cmdline < /proc/cmdline | xargs || true)
+            if [[ -n "$proc_cmdline" && "$proc_cmdline" =~ (root=|rd.luks.uuid=|rootfstype=) ]]; then
+                info "Using cmdline from /proc/cmdline"
+                echo "$proc_cmdline"
+                return 0
+            fi
+        fi
+
+        if [[ -s /etc/kernel/cmdline ]]; then
+            kernel_cmdline=$(sanitize_cmdline < /etc/kernel/cmdline | xargs || true)
+            if [[ -n "$kernel_cmdline" && "$kernel_cmdline" =~ (root=|rd.luks.uuid=|rootfstype=) ]]; then
+                info "Using cmdline from /etc/kernel/cmdline"
+                echo "$kernel_cmdline"
+                return 0
+            fi
+        fi
+
+        grub_cmdline=$(read_grub_cmdline || true)
+        if [[ -n "$grub_cmdline" ]]; then
+            grub_cmdline=$(printf '%s\n' "$grub_cmdline" | sanitize_cmdline | xargs || true)
+            if [[ -n "$grub_cmdline" && "$grub_cmdline" =~ (root=|rd.luks.uuid=|rootfstype=) ]]; then
+                info "Using cmdline from GRUB configuration"
+                echo "$grub_cmdline"
+                return 0
+            fi
+        fi
+
+        warn "Auto-detect enabled, but no bootable cmdline was detected. Falling back to configured CMDLINE."
+    fi
+
+    echo "$CMDLINE"
+}
 
 ESP_MOUNT_CANDIDATES=(
     /boot/efi
@@ -385,14 +448,69 @@ require_cmd efibootmgr
 mkdir -p "$EFI_DIR"
 ensure_esp_mounted || die "ESP is not mounted and automatic mount failed. Checked: ${ESP_MOUNT_CANDIDATES[*]}"
 
+sanitize_cmdline() {
+    sed -E 's/(^| )BOOT_IMAGE=[^ ]*//g; s/(^| )initrd=[^ ]*//g; s/(^| )rd\.driver\.blacklist=[^ ]*//g; s/  +/ /g; s/^ //; s/ $//'
+}
+
+read_grub_cmdline() {
+    local file line value
+
+    for file in /etc/default/grub /etc/default/grub.d/*.cfg; do
+        [[ -f "$file" ]] || continue
+        while IFS= read -r line; do
+            [[ "$line" =~ ^[[:space:]]*# ]] && continue
+            if [[ "$line" =~ GRUB_CMDLINE_LINUX[[:space:]]*= ]]; then
+                value=$(printf '%s\n' "$line" | sed -n 's/^[[:space:]]*GRUB_CMDLINE_LINUX[[:space:]]*=[[:space:]]*"\\(.*\\)"[[:space:]]*$/\\1/p')
+                [[ -z "$value" ]] && value=$(printf '%s\n' "$line" | sed -n "s/^[[:space:]]*GRUB_CMDLINE_LINUX[[:space:]]*=[[:space:]]*'\\(.*\\)'[[:space:]]*$/\\1/p")
+                [[ -n "$value" ]] && { echo "$value"; return 0; }
+            fi
+        done < "$file"
+    done
+
+    return 1
+}
+
+get_effective_cmdline() {
+    local proc_cmdline kernel_cmdline grub_cmdline
+
+    if [[ "$AUTO_DETECT_CMDLINE" -eq 1 ]]; then
+        if [[ -r /proc/cmdline ]]; then
+            proc_cmdline=$(sanitize_cmdline < /proc/cmdline | xargs || true)
+            if [[ -n "$proc_cmdline" && "$proc_cmdline" =~ (root=|rd.luks.uuid=|rootfstype=) ]]; then
+                info "Using cmdline from /proc/cmdline: ${proc_cmdline}"
+                echo "$proc_cmdline"
+                return 0
+            fi
+        fi
+
+        if [[ -s /etc/kernel/cmdline ]]; then
+            kernel_cmdline=$(sanitize_cmdline < /etc/kernel/cmdline | xargs || true)
+            if [[ -n "$kernel_cmdline" && "$kernel_cmdline" =~ (root=|rd.luks.uuid=|rootfstype=) ]]; then
+                info "Using cmdline from /etc/kernel/cmdline: ${kernel_cmdline}"
+                echo "$kernel_cmdline"
+                return 0
+            fi
+        fi
+
+        grub_cmdline=$(read_grub_cmdline || true)
+        if [[ -n "$grub_cmdline" ]]; then
+            grub_cmdline=$(printf '%s\n' "$grub_cmdline" | sanitize_cmdline | xargs || true)
+            if [[ -n "$grub_cmdline" && "$grub_cmdline" =~ (root=|rd.luks.uuid=|rootfstype=) ]]; then
+                info "Using cmdline from GRUB configuration: ${grub_cmdline}"
+                echo "$grub_cmdline"
+                return 0
+            fi
+        fi
+
+        warn "Auto-detect enabled, but no bootable cmdline was detected. Falling back to configured CMDLINE: ${CMDLINE}"
+    fi
+
+    info "Using configured cmdline: ${CMDLINE}"
+    echo "$CMDLINE"
+}
+
 # Build effective cmdline
-if [[ "$AUTO_DETECT_CMDLINE" -eq 1 ]]; then
-    EFFECTIVE_CMDLINE=$(sed 's/BOOT_IMAGE=[^ ]*//g; s/initrd=[^ ]*//g; s/  */ /g' /proc/cmdline | xargs)
-    info "Auto-detected cmdline: ${EFFECTIVE_CMDLINE}"
-else
-    EFFECTIVE_CMDLINE="$CMDLINE"
-    info "Using configured cmdline: ${EFFECTIVE_CMDLINE}"
-fi
+EFFECTIVE_CMDLINE=$(get_effective_cmdline)
 
 # Locate EFI stub
 if [[ -z "$EFI_STUB" ]]; then
@@ -580,15 +698,13 @@ phase_initial_build() {
     hr
     info "Phase 6: Building UKI for current kernel: $(uname -r)"
 
-    if [[ "$AUTO_DETECT_CMDLINE" -eq 0 && "$CMDLINE" == "rw quiet rhgb" ]]; then
+    if [[ "$AUTO_DETECT_CMDLINE" -eq 0 && "$CMDLINE" == "root=UUID=REPLACE-ME rw quiet rhgb" ]]; then
         warn "────────────────────────────────────────────────────────────"
-        warn "CMDLINE is still the placeholder default."
-        warn "The UKI may not boot correctly without a proper root= parameter."
-        warn "Edit CMDLINE at the top of this script, then re-run, OR"
-        warn "set AUTO_DETECT_CMDLINE=1 to pull parameters from the live system."
+        warn "AUTO_DETECT_CMDLINE is disabled and CMDLINE is still placeholder text."
+        warn "Set CMDLINE to a real root=... value, or enable AUTO_DETECT_CMDLINE=1."
         warn "────────────────────────────────────────────────────────────"
-        read -r -p "Continue with default CMDLINE anyway? [y/N] " ans
-        [[ "${ans,,}" == "y" ]] || { info "Aborted. Edit CMDLINE and re-run."; exit 0; }
+        read -r -p "Continue with placeholder CMDLINE anyway? [y/N] " ans
+        [[ "${ans,,}" == "y" ]] || { info "Aborted. Set CMDLINE and re-run."; exit 0; }
     fi
 
     "$BUILD_SCRIPT" "$(uname -r)"

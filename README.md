@@ -70,7 +70,7 @@ curl -fsSL https://raw.githubusercontent.com/GlitchSlayed/Fedora-UKI-Script/main
 ```
 
 1. Clone this repository.
-2. Edit configuration values at the top of `uki-setup.sh` (especially `CMDLINE`).
+2. Optionally review configuration values at the top of `uki-setup.sh` (`AUTO_DETECT_CMDLINE` is enabled by default, while `CMDLINE` remains a manual fallback).
 3. Run:
 
 ```bash
@@ -100,21 +100,27 @@ EFI_DIR="/boot/efi/EFI/Linux"
 ### `CMDLINE`
 Kernel command line embedded into the UKI.
 
-Default placeholder:
+Default fallback value:
 
 ```bash
-CMDLINE="rw quiet rhgb"
+CMDLINE="root=UUID=REPLACE-ME rw quiet rhgb"
 ```
 
-You should typically include your root device details (`root=UUID=...`, and any encryption/LVM/btrfs args needed by your setup).
+This is only used when auto-detection is disabled or cannot find a usable bootable cmdline. Set it to your own known-good manual value as a backup.
 
 ### `AUTO_DETECT_CMDLINE`
-When set to `1`, command line is derived from `/proc/cmdline` (with boot-loader-specific items removed).
+When set to `1`, command line is auto-detected in this order:
+
+1. `/proc/cmdline` (current running boot)
+2. `/etc/kernel/cmdline`
+3. `GRUB_CMDLINE_LINUX` from `/etc/default/grub` and `/etc/default/grub.d/*.cfg`
+
+If none of these provide a bootable command line (for example one containing `root=`), the script falls back to `CMDLINE`.
 
 Default:
 
 ```bash
-AUTO_DETECT_CMDLINE=0
+AUTO_DETECT_CMDLINE=1
 ```
 
 ### `EFI_STUB`
