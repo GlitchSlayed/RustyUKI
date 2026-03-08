@@ -184,8 +184,11 @@ ensure_esp_mounted() {
     for candidate in "${ESP_MOUNT_CANDIDATES[@]}"; do
         mkdir -p "$candidate"
         if mount "$candidate" &>/dev/null && findmnt "$candidate" &>/dev/null; then
-            info "Mounted ESP at ${candidate} using fstab entry."
-            return 0
+            esp_mount="$(find_mounted_esp_target || true)"
+            if [[ -n "$esp_mount" ]]; then
+                info "Mounted ESP at ${esp_mount} using fstab entry."
+                return 0
+            fi
         fi
     done
 
@@ -195,8 +198,11 @@ ensure_esp_mounted() {
         for candidate in "${ESP_MOUNT_CANDIDATES[@]}"; do
             mkdir -p "$candidate"
             if mount -t vfat "$esp_dev" "$candidate" &>/dev/null && findmnt "$candidate" &>/dev/null; then
-                info "Mounted ESP device ${esp_dev} at ${candidate}."
-                return 0
+                esp_mount="$(find_mounted_esp_target || true)"
+                if [[ -n "$esp_mount" ]]; then
+                    info "Mounted ESP device ${esp_dev} at ${esp_mount}."
+                    return 0
+                fi
             fi
         done
     fi
@@ -416,8 +422,11 @@ ensure_esp_mounted() {
     for candidate in "${ESP_MOUNT_CANDIDATES[@]}"; do
         mkdir -p "$candidate"
         if mount "$candidate" &>/dev/null && findmnt "$candidate" &>/dev/null; then
-            info "Mounted ESP at ${candidate} using fstab entry"
-            return 0
+            esp_mount=$(find_mounted_esp_target || true)
+            if [[ -n "$esp_mount" ]]; then
+                info "Mounted ESP at ${esp_mount} using fstab entry"
+                return 0
+            fi
         fi
     done
 
@@ -426,8 +435,11 @@ ensure_esp_mounted() {
         for candidate in "${ESP_MOUNT_CANDIDATES[@]}"; do
             mkdir -p "$candidate"
             if mount -t vfat "$esp_dev" "$candidate" &>/dev/null && findmnt "$candidate" &>/dev/null; then
-                info "Mounted ESP device ${esp_dev} at ${candidate}"
-                return 0
+                esp_mount=$(find_mounted_esp_target || true)
+                if [[ -n "$esp_mount" ]]; then
+                    info "Mounted ESP device ${esp_dev} at ${esp_mount}"
+                    return 0
+                fi
             fi
         done
     fi
