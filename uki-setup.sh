@@ -1,7 +1,8 @@
 #!/bin/bash
 # =============================================================================
 # uki-setup.sh
-# Builds a Unified Kernel Image (UKI) using dracut on Fedora / Fedora-based
+# Builds a Unified Kernel Image (UKI) using a two-stage dracut + ukify
+# pipeline on Fedora / Fedora-based
 # systems and installs a kernel-install(8) plugin so the UKI is rebuilt
 # automatically every time a kernel is installed or removed via dnf/rpm.
 #
@@ -48,10 +49,17 @@ CMDLINE="root=UUID=REPLACE-ME rw quiet rhgb"
 # If all of the above fail, falls back to CMDLINE.
 AUTO_DETECT_CMDLINE=1
 
-# Path to the systemd-boot EFI stub used by dracut --uefi.
-# Fedora ships this in systemd-boot-unsigned or systemd.
-# dracut will find it automatically on Fedora; set explicitly if needed.
-EFI_STUB=""   # e.g. "/usr/lib/systemd/boot/efi/linuxx64.efi.stub"
+# Optional Secure Boot settings passed to ukify via a temporary [UKI] config.
+# Leave empty to build unsigned UKIs.
+UKIFY_SB_KEY=""   # e.g. "/etc/pki/uki/db.key"
+UKIFY_SB_CERT=""  # e.g. "/etc/pki/uki/db.crt"
+
+# Optional initramfs validation configuration that is templated into uki-build.sh.
+# Populate required/forbidden lists with one path per line (comments with '#').
+INITRAMFS_REQUIRED_LIST="/etc/uki/initramfs-required.txt"
+INITRAMFS_FORBIDDEN_LIST="/etc/uki/initramfs-forbidden.txt"
+INITRAMFS_STATE_DIR="/var/lib/uki-build"
+INITRAMFS_STRICT_DIFF=0
 
 # =============================================================================
 # ──  SCRIPT INTERNALS  ───────────────────────────────────────────────────────
@@ -59,7 +67,7 @@ EFI_STUB=""   # e.g. "/usr/lib/systemd/boot/efi/linuxx64.efi.stub"
 
 SELF="$(realpath "$0")"
 BUILD_SCRIPT="/usr/local/sbin/uki-build.sh"
-INSTALL_PLUGIN="/usr/lib/kernel/install.d/90-uki-dracut.install"
+INSTALL_PLUGIN="/usr/lib/kernel/install.d/90-uki-ukify.install"
 BACKUP_ROOT="/var/backups/uki-setup"
 PKG_MGR=""
 PKG_INSTALL_CMD=()
@@ -323,9 +331,9 @@ phase_deps() {
     local pkgs=(dracut efibootmgr binutils)
 
     case "$PKG_MGR" in
-        dnf) pkgs+=(systemd-boot-unsigned) ;;
-        apt) pkgs+=(systemd-boot-efi) ;;
-        zypper) pkgs+=(systemd-boot) ;;
+        dnf) pkgs+=(systemd-ukify) ;;
+        apt) pkgs+=(systemd-ukify) ;;
+        zypper) pkgs+=(systemd-ukify) ;;
         pacman) pkgs+=(systemd) ;;
         *) warn "Unknown package manager. Will verify commands without package installs." ;;
     esac
@@ -333,13 +341,9 @@ phase_deps() {
     ensure_packages "${pkgs[@]}"
 
     require_cmd dracut
+    require_cmd ukify
+    require_cmd lsinitrd
     require_cmd efibootmgr
-    dracut --help | grep -q -- '--uefi' || die "Installed dracut does not support --uefi"
-
-    if ! command -v sbsign &>/dev/null; then
-        warn "sbsigntools not installed — UKIs will not be Secure Boot signed."
-        warn "Install later using your package manager (package often named 'sbsigntools')."
-    fi
 }
 
 # =============================================================================
@@ -365,7 +369,12 @@ set -euo pipefail
 EFI_DIR="__EFI_DIR__"
 CMDLINE="__CMDLINE__"
 AUTO_DETECT_CMDLINE=__AUTO_DETECT_CMDLINE__
-EFI_STUB="__EFI_STUB__"
+UKIFY_SB_KEY="__UKIFY_SB_KEY__"
+UKIFY_SB_CERT="__UKIFY_SB_CERT__"
+INITRAMFS_REQUIRED_LIST="__INITRAMFS_REQUIRED_LIST__"
+INITRAMFS_FORBIDDEN_LIST="__INITRAMFS_FORBIDDEN_LIST__"
+INITRAMFS_STATE_DIR="__INITRAMFS_STATE_DIR__"
+INITRAMFS_STRICT_DIFF=__INITRAMFS_STRICT_DIFF__
 # ─────────────────────────────────────────────────────────────────────────────
 
 RED='\e[31;1m'; GRN='\e[32;1m'; YLW='\e[33;1m'; RST='\e[0m'
@@ -447,19 +456,6 @@ ensure_esp_mounted() {
     return 1
 }
 
-KERNEL_VER="${1:-$(uname -r)}"
-KERNEL_IMG="/lib/modules/${KERNEL_VER}/vmlinuz"
-UKI_OUT="${EFI_DIR}/linux-${KERNEL_VER}.efi"
-
-[[ $EUID -eq 0 ]] || die "Must run as root."
-require_cmd dracut
-require_cmd findmnt
-require_cmd lsblk
-require_cmd efibootmgr
-[[ -f "$KERNEL_IMG" ]] || die "Kernel image not found: ${KERNEL_IMG}"
-mkdir -p "$EFI_DIR"
-ensure_esp_mounted || die "ESP is not mounted and automatic mount failed. Checked: ${ESP_MOUNT_CANDIDATES[*]}"
-
 sanitize_cmdline() {
     sed -E 's/(^| )BOOT_IMAGE=[^ ]*//g; s/(^| )initrd=[^ ]*//g; s/(^| )rd\.driver\.blacklist=[^ ]*//g; s/  +/ /g; s/^ //; s/ $//'
 }
@@ -472,8 +468,8 @@ read_grub_cmdline() {
         while IFS= read -r line; do
             [[ "$line" =~ ^[[:space:]]*# ]] && continue
             if [[ "$line" =~ GRUB_CMDLINE_LINUX[[:space:]]*= ]]; then
-                value=$(printf '%s\n' "$line" | sed -n 's/^[[:space:]]*GRUB_CMDLINE_LINUX[[:space:]]*=[[:space:]]*"\\(.*\\)"[[:space:]]*$/\\1/p')
-                [[ -z "$value" ]] && value=$(printf '%s\n' "$line" | sed -n "s/^[[:space:]]*GRUB_CMDLINE_LINUX[[:space:]]*=[[:space:]]*'\\(.*\\)'[[:space:]]*$/\\1/p")
+                value=$(printf '%s\n' "$line" | sed -n 's/^[[:space:]]*GRUB_CMDLINE_LINUX[[:space:]]*=[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p')
+                [[ -z "$value" ]] && value=$(printf '%s\n' "$line" | sed -n "s/^[[:space:]]*GRUB_CMDLINE_LINUX[[:space:]]*=[[:space:]]*'\(.*\)'[[:space:]]*$/\1/p")
                 [[ -n "$value" ]] && { echo "$value"; return 0; }
             fi
         done < "$file"
@@ -521,38 +517,140 @@ get_effective_cmdline() {
     echo "$CMDLINE"
 }
 
-# Build effective cmdline
+check_paths_against_list() {
+    local list_file="$1" all_paths_file="$2" mode="$3"
+    [[ -f "$list_file" ]] || return 0
+
+    local entry normalized hit=0
+    while IFS= read -r entry || [[ -n "$entry" ]]; do
+        entry="${entry%%#*}"
+        entry="${entry## }"
+        entry="${entry%% }"
+        [[ -n "$entry" ]] || continue
+        normalized="${entry#/}"
+        if grep -Fxq "$normalized" "$all_paths_file"; then
+            if [[ "$mode" == "forbidden" ]]; then
+                die "Initramfs validation failed: forbidden path present: ${entry}"
+            fi
+        else
+            if [[ "$mode" == "required" ]]; then
+                die "Initramfs validation failed: required path missing: ${entry}"
+            fi
+        fi
+        hit=1
+    done < "$list_file"
+
+    if [[ "$hit" -eq 1 ]]; then
+        info "Validated ${mode} path list: ${list_file}"
+    fi
+}
+
+validate_initramfs_artifact() {
+    local unpack_dir list_file current_manifest previous_manifest
+    unpack_dir=$(mktemp -d)
+    list_file=$(mktemp)
+
+    cleanup_items+=("$unpack_dir" "$list_file")
+
+    info "Validating initramfs artifact before UKI assembly"
+    lsinitrd "$INITRD_OUT" >/dev/null
+    lsinitrd -f /init "$INITRD_OUT" >/dev/null || die "Initramfs validation failed: /init missing"
+
+    (
+        cd "$unpack_dir"
+        lsinitrd --unpack "$INITRD_OUT" >/dev/null
+    )
+
+    (
+        cd "$unpack_dir"
+        find . -mindepth 1 -printf '%P\n' | sort -u
+    ) > "$list_file"
+
+    check_paths_against_list "$INITRAMFS_REQUIRED_LIST" "$list_file" "required"
+    check_paths_against_list "$INITRAMFS_FORBIDDEN_LIST" "$list_file" "forbidden"
+
+    mkdir -p "$INITRAMFS_STATE_DIR"
+    current_manifest="$INITRAMFS_STATE_DIR/initramfs-${KERNEL_VER}.manifest"
+    previous_manifest="$INITRAMFS_STATE_DIR/initramfs-${KERNEL_VER}.manifest.prev"
+
+    if [[ -f "$current_manifest" ]]; then
+        cp -f "$current_manifest" "$previous_manifest"
+    fi
+    cp -f "$list_file" "$current_manifest"
+
+    if [[ -f "$previous_manifest" ]] && ! diff -u "$previous_manifest" "$current_manifest" >/dev/null; then
+        if [[ "$INITRAMFS_STRICT_DIFF" -eq 1 ]]; then
+            diff -u "$previous_manifest" "$current_manifest" || true
+            die "Initramfs regression detected for ${KERNEL_VER}."
+        fi
+        warn "Initramfs contents changed for ${KERNEL_VER}; review diff if unexpected."
+    fi
+}
+
+KERNEL_VER="${1:-$(uname -r)}"
+KERNEL_IMG="/lib/modules/${KERNEL_VER}/vmlinuz"
+INITRD_OUT="/tmp/initramfs-${KERNEL_VER}.img"
+UKI_OUT="${EFI_DIR}/linux-${KERNEL_VER}.efi"
+
+[[ $EUID -eq 0 ]] || die "Must run as root."
+require_cmd dracut
+require_cmd ukify
+require_cmd lsinitrd
+require_cmd findmnt
+require_cmd lsblk
+require_cmd efibootmgr
+[[ -f "$KERNEL_IMG" ]] || die "Kernel image not found: ${KERNEL_IMG}"
+mkdir -p "$EFI_DIR"
+ensure_esp_mounted || die "ESP is not mounted and automatic mount failed. Checked: ${ESP_MOUNT_CANDIDATES[*]}"
+
 EFFECTIVE_CMDLINE=$(get_effective_cmdline)
 
-# Locate EFI stub
-if [[ -z "$EFI_STUB" ]]; then
-    for candidate in \
-        /usr/lib/systemd/boot/efi/linuxx64.efi.stub \
-        /lib/systemd/boot/efi/linuxx64.efi.stub \
-        /usr/lib/gummiboot/linuxx64.efi.stub; do
-        if [[ -f "$candidate" ]]; then
-            EFI_STUB="$candidate"
-            break
-        fi
-    done
-fi
-[[ -f "${EFI_STUB:-}" ]] || die "EFI stub not found. Install your distro package for systemd-boot EFI stub."
-info "EFI stub: ${EFI_STUB}"
+cleanup_items=("$INITRD_OUT")
 
-# Build dracut arguments
-DRACUT_ARGS=(
-    --force
-    --no-hostonly-cmdline       # we embed our own cmdline below
-    --kernel-image  "$KERNEL_IMG"
-    --kver          "$KERNEL_VER"
-    --uefi
-    --uefi-stub     "$EFI_STUB"
-    --kernel-cmdline "$EFFECTIVE_CMDLINE"
+info "Stage 1/2: Building standalone initramfs via dracut: ${INITRD_OUT}"
+dracut --force --kver "$KERNEL_VER" "$INITRD_OUT"
+
+validate_initramfs_artifact
+
+UKIFY_ARGS=(
+    build
+    --linux "$KERNEL_IMG"
+    --initrd "$INITRD_OUT"
+    --cmdline "$EFFECTIVE_CMDLINE"
+    --os-release /etc/os-release
+    --uname "$KERNEL_VER"
+    --output "$UKI_OUT"
 )
 
-info "Building UKI: ${UKI_OUT}"
-info "Running dracut…"
-dracut "${DRACUT_ARGS[@]}" "$UKI_OUT"
+UKIFY_CONF=""
+if [[ -n "$UKIFY_SB_KEY" || -n "$UKIFY_SB_CERT" ]]; then
+    [[ -n "$UKIFY_SB_KEY" && -n "$UKIFY_SB_CERT" ]] || die "Set both UKIFY_SB_KEY and UKIFY_SB_CERT for Secure Boot signing."
+    [[ -r "$UKIFY_SB_KEY" ]] || die "Cannot read UKIFY_SB_KEY: ${UKIFY_SB_KEY}"
+    [[ -r "$UKIFY_SB_CERT" ]] || die "Cannot read UKIFY_SB_CERT: ${UKIFY_SB_CERT}"
+    UKIFY_CONF=$(mktemp)
+    cat > "$UKIFY_CONF" <<EOF
+[UKI]
+SecureBootPrivateKey=${UKIFY_SB_KEY}
+SecureBootCertificate=${UKIFY_SB_CERT}
+EOF
+    UKIFY_ARGS+=(--config "$UKIFY_CONF")
+fi
+
+cleanup() {
+    local item
+    for item in "${cleanup_items[@]}"; do
+        if [[ -d "$item" ]]; then
+            rm -rf "$item"
+        else
+            rm -f "$item"
+        fi
+    done
+    [[ -n "$UKIFY_CONF" ]] && rm -f "$UKIFY_CONF"
+}
+trap cleanup EXIT
+
+info "Stage 2/2: Assembling UKI via ukify: ${UKI_OUT}"
+ukify "${UKIFY_ARGS[@]}"
 
 info "UKI built successfully: ${UKI_OUT} ($(du -sh "$UKI_OUT" | cut -f1))"
 
@@ -560,15 +658,11 @@ info "UKI built successfully: ${UKI_OUT} ($(du -sh "$UKI_OUT" | cut -f1))"
 LABEL="Linux UKI ${KERNEL_VER}"
 
 # Determine ESP mount point, disk, and partition number
-ESP_MOUNT=$(find_mounted_esp_target) \
-    || { warn "Cannot detect ESP mount — skipping efibootmgr."; exit 0; }
-ESP_DEV=$(findmnt -n -o SOURCE "$ESP_MOUNT") \
-    || { warn "Cannot detect ESP device — skipping efibootmgr."; exit 0; }
+ESP_MOUNT=$(find_mounted_esp_target)     || { warn "Cannot detect ESP mount — skipping efibootmgr."; exit 0; }
+ESP_DEV=$(findmnt -n -o SOURCE "$ESP_MOUNT")     || { warn "Cannot detect ESP device — skipping efibootmgr."; exit 0; }
 ESP_DEV_NAME="${ESP_DEV##*/}"   # e.g. sda1 or nvme0n1p1
-ESP_DISK_NAME=$(lsblk -no PKNAME "$ESP_DEV" 2>/dev/null | head -1) \
-    || { warn "Cannot detect disk for ${ESP_DEV} — skipping efibootmgr."; exit 0; }
-ESP_PART_NUM=$(cat "/sys/class/block/${ESP_DEV_NAME}/partition" 2>/dev/null) \
-    || { warn "Cannot read partition number — skipping efibootmgr."; exit 0; }
+ESP_DISK_NAME=$(lsblk -no PKNAME "$ESP_DEV" 2>/dev/null | head -1)     || { warn "Cannot detect disk for ${ESP_DEV} — skipping efibootmgr."; exit 0; }
+ESP_PART_NUM=$(cat "/sys/class/block/${ESP_DEV_NAME}/partition" 2>/dev/null)     || { warn "Cannot read partition number — skipping efibootmgr."; exit 0; }
 
 # Build the loader path relative to the ESP (efibootmgr needs backslashes)
 REL_PATH="${UKI_OUT#${ESP_MOUNT}}"          # strip ESP mount prefix
@@ -600,7 +694,12 @@ BUILDBODY
         -e "s|__EFI_DIR__|${EFI_DIR}|g" \
         -e "s|__CMDLINE__|${CMDLINE}|g" \
         -e "s|__AUTO_DETECT_CMDLINE__|${AUTO_DETECT_CMDLINE}|g" \
-        -e "s|__EFI_STUB__|${EFI_STUB}|g" \
+        -e "s|__UKIFY_SB_KEY__|${UKIFY_SB_KEY}|g" \
+        -e "s|__UKIFY_SB_CERT__|${UKIFY_SB_CERT}|g" \
+        -e "s|__INITRAMFS_REQUIRED_LIST__|${INITRAMFS_REQUIRED_LIST}|g" \
+        -e "s|__INITRAMFS_FORBIDDEN_LIST__|${INITRAMFS_FORBIDDEN_LIST}|g" \
+        -e "s|__INITRAMFS_STATE_DIR__|${INITRAMFS_STATE_DIR}|g" \
+        -e "s|__INITRAMFS_STRICT_DIFF__|${INITRAMFS_STRICT_DIFF}|g" \
         "$BUILD_SCRIPT"
 
     chmod 0755 "$BUILD_SCRIPT"
@@ -620,7 +719,7 @@ phase_write_plugin() {
 
     cat > "$INSTALL_PLUGIN" <<PLUGINBODY
 #!/bin/bash
-# /usr/lib/kernel/install.d/90-uki-dracut.install
+# /usr/lib/kernel/install.d/90-uki-ukify.install
 # kernel-install plugin — rebuild UKI on kernel add/remove.
 # Managed by uki-setup.sh — do not edit directly.
 
