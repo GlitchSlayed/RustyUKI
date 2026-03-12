@@ -149,10 +149,84 @@ ESP_MOUNT_CANDIDATES=(
     /esp
 )
 
+ESP_GUID="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+BIOS_BOOT_GUID="21686148-6449-6e6f-744e-656564454649"
+ESP_MIN_AVAIL_BYTES=$((150 * 1024 * 1024))
+
 find_esp_device() {
-    # GPT ESP type GUID: c12a7328-f81f-11d2-ba4b-00a0c93ec93b
-    lsblk -pnro PATH,PARTTYPE,FSTYPE 2>/dev/null \
-        | awk '$2=="c12a7328-f81f-11d2-ba4b-00a0c93ec93b" && tolower($3) ~ /fat|vfat/ {print $1; exit}'
+    # Prefer lsblk PARTTYPE, but fall back to blkid TYPE/PART_ENTRY_TYPE
+    local dev
+
+    dev="$(lsblk -pnro PATH,PARTTYPE,FSTYPE 2>/dev/null \
+        | awk -v esp_guid="$ESP_GUID" '$2==esp_guid && tolower($3) ~ /fat|vfat/ {print $1; exit}')"
+    if [[ -n "$dev" ]]; then
+        echo "$dev"
+        return 0
+    fi
+
+    while read -r dev; do
+        [[ -n "$dev" ]] || continue
+        local part_entry_type fstype
+        part_entry_type="$(blkid -s PART_ENTRY_TYPE -o value "$dev" 2>/dev/null | tr 'A-Z' 'a-z')"
+        fstype="$(blkid -s TYPE -o value "$dev" 2>/dev/null | tr 'A-Z' 'a-z')"
+        [[ "$part_entry_type" == "$ESP_GUID" ]] || continue
+        [[ "$fstype" =~ ^(vfat|fat|fat32|msdos)$ ]] || continue
+        echo "$dev"
+        return 0
+    done < <(lsblk -pnro PATH,TYPE 2>/dev/null | awk '$2=="part" {print $1}')
+
+    return 1
+}
+
+find_bios_boot_device() {
+    local dev
+
+    dev="$(lsblk -pnro PATH,PARTTYPE,TYPE 2>/dev/null \
+        | awk -v bios_guid="$BIOS_BOOT_GUID" '$3=="part" && tolower($2)==bios_guid {print $1; exit}')"
+    if [[ -n "$dev" ]]; then
+        echo "$dev"
+        return 0
+    fi
+
+    while read -r dev; do
+        [[ -n "$dev" ]] || continue
+        if [[ "$(blkid -s PART_ENTRY_TYPE -o value "$dev" 2>/dev/null | tr 'A-Z' 'a-z')" == "$BIOS_BOOT_GUID" ]]; then
+            echo "$dev"
+            return 0
+        fi
+    done < <(lsblk -pnro PATH,TYPE 2>/dev/null | awk '$2=="part" {print $1}')
+
+    return 1
+}
+
+is_valid_esp_partition() {
+    local dev="$1"
+    [[ -b "$dev" ]] || return 1
+
+    local parttype fstype
+    parttype="$(lsblk -pnro PARTTYPE "$dev" 2>/dev/null | head -1 | tr 'A-Z' 'a-z')"
+    fstype="$(lsblk -pnro FSTYPE "$dev" 2>/dev/null | head -1 | tr 'A-Z' 'a-z')"
+
+    if [[ "$parttype" != "$ESP_GUID" ]]; then
+        parttype="$(blkid -s PART_ENTRY_TYPE -o value "$dev" 2>/dev/null | tr 'A-Z' 'a-z')"
+    fi
+    if [[ -z "$fstype" ]]; then
+        fstype="$(blkid -s TYPE -o value "$dev" 2>/dev/null | tr 'A-Z' 'a-z')"
+    fi
+
+    [[ "$parttype" == "$ESP_GUID" ]] || return 1
+    [[ "$fstype" =~ ^(vfat|fat|fat32|msdos)$ ]] || return 1
+}
+
+validate_esp_free_space() {
+    local esp_mount="$1"
+    local avail_bytes
+    avail_bytes="$(df --output=avail -B1 "$esp_mount" 2>/dev/null | awk 'NR==2 {print $1}')"
+    [[ "$avail_bytes" =~ ^[0-9]+$ ]] || die "ESP free-space check failed for ${esp_mount}. Checked via 'df --output=avail -B1'. Fix: verify ${esp_mount} is mounted and readable, then re-run."
+
+    if (( avail_bytes < ESP_MIN_AVAIL_BYTES )); then
+        die "ESP free-space check failed for ${esp_mount}. Available: ${avail_bytes} bytes; required: at least ${ESP_MIN_AVAIL_BYTES} bytes (~150MB). Fix: free space on the ESP or enlarge it, then re-run."
+    fi
 }
 
 find_mounted_esp_target() {
@@ -182,6 +256,7 @@ ensure_esp_mounted() {
 
     esp_mount="$(find_mounted_esp_target || true)"
     if [[ -n "$esp_mount" ]]; then
+        validate_esp_free_space "$esp_mount"
         info "ESP mounted at ${esp_mount}."
         return 0
     fi
@@ -203,11 +278,15 @@ ensure_esp_mounted() {
     # Fallback: detect the ESP partition and mount directly.
     esp_dev="$(find_esp_device || true)"
     if [[ -n "$esp_dev" ]]; then
+        if ! is_valid_esp_partition "$esp_dev"; then
+            die "ESP detection found ${esp_dev}, but partition validation failed. Checked GUID (${ESP_GUID}) and FAT filesystem via lsblk/blkid. Fix: format the EFI System Partition as FAT32/vfat and ensure its GPT type is set to ESP."
+        fi
         for candidate in "${ESP_MOUNT_CANDIDATES[@]}"; do
             mkdir -p "$candidate"
             if mount -t vfat "$esp_dev" "$candidate" &>/dev/null && findmnt "$candidate" &>/dev/null; then
                 esp_mount="$(find_mounted_esp_target || true)"
                 if [[ -n "$esp_mount" ]]; then
+                    validate_esp_free_space "$esp_mount"
                     info "Mounted ESP device ${esp_dev} at ${esp_mount}."
                     return 0
                 fi
@@ -283,6 +362,8 @@ phase_preflight() {
     detect_package_manager
     require_cmd findmnt
     require_cmd lsblk
+    require_cmd blkid
+    require_cmd df
     require_cmd sed
     require_cmd awk
     require_cmd xargs
@@ -295,29 +376,33 @@ phase_preflight() {
         warn "/etc/os-release not found — proceeding anyway."
     fi
 
-    # Check for UEFI — try several indicators since /sys/firmware/efi
-    # can be absent even on real UEFI systems (efivarfs not mounted, etc.)
-    local uefi_detected=0
-    [[ -d /sys/firmware/efi ]]          && uefi_detected=1
-    [[ -d /sys/firmware/efi/efivars ]]  && uefi_detected=1
-    findmnt /boot/efi &>/dev/null       && uefi_detected=1
-    findmnt /efi      &>/dev/null       && uefi_detected=1
-    [[ -d /boot/efi/EFI ]]              && uefi_detected=1
-    [[ -d /efi/EFI    ]]                && uefi_detected=1
-    if command -v efibootmgr &>/dev/null && efibootmgr &>/dev/null 2>&1; then
-        uefi_detected=1
+    if [[ ! -d /sys/firmware/efi ]]; then
+        local bios_boot_dev=""
+        bios_boot_dev="$(find_bios_boot_device || true)"
+        [[ -n "$bios_boot_dev" ]] && warn "Detected BIOS Boot partition (${bios_boot_dev}) via lsblk/blkid (GUID ${BIOS_BOOT_GUID})."
+        if command -v efibootmgr &>/dev/null; then
+            warn "Diagnostic: efibootmgr output (non-fatal diagnostic only):"
+            efibootmgr 2>&1 | sed 's/^/[diag] /' >&2 || true
+        else
+            warn "Diagnostic: efibootmgr not installed yet; cannot gather firmware boot-entry diagnostics."
+        fi
+        warn "Diagnostic: mounted FAT targets with findmnt: $(findmnt -rn -t vfat,fat -o TARGET 2>/dev/null | tr '\n' ' ' || true)"
+        die "UEFI gate failed: /sys/firmware/efi is missing. UKI setup requires booting this machine in UEFI firmware mode with a valid EFI System Partition (ESP). Fix: switch firmware/bootloader to UEFI mode, create/mark an ESP (GPT type ${ESP_GUID}, FAT32/vfat), mount it (e.g. /boot/efi), then re-run."
     fi
 
-    if [[ $uefi_detected -eq 0 ]]; then
-        warn "Could not confirm UEFI environment via any detection method."
-        warn "(/sys/firmware/efi absent, no ESP mounted, efibootmgr unresponsive)"
-        read -r -p "Continue anyway? [y/N] " ans
-        [[ "${ans,,}" == "y" ]] || die "Aborted. Verify your system is UEFI and the ESP is mounted."
-    else
-        info "UEFI environment confirmed."
-    fi
+    info "UEFI environment confirmed via /sys/firmware/efi."
+
+    local esp_dev=""
+    esp_dev="$(find_esp_device || true)"
+    [[ -n "$esp_dev" ]] || die "ESP detection failed before mount attempts. Checked GPT type ${ESP_GUID} via lsblk and blkid PART_ENTRY_TYPE fallback; no FAT32/vfat ESP partition found. Fix: create an EFI System Partition and format it as FAT32/vfat, then re-run."
+    is_valid_esp_partition "$esp_dev" || die "ESP validation failed for ${esp_dev}. Checked GPT type (${ESP_GUID}) and filesystem (FAT32/vfat) via lsblk/blkid. Fix: correct partition type/filesystem, then re-run."
 
     ensure_esp_mounted || die "ESP is not mounted and automatic mount failed. Checked: ${ESP_MOUNT_CANDIDATES[*]}. Mount it manually, then re-run."
+
+    local esp_mount=""
+    esp_mount="$(find_mounted_esp_target || true)"
+    [[ -n "$esp_mount" ]] || die "ESP mount verification failed after mount attempts. Checked candidates: ${ESP_MOUNT_CANDIDATES[*]}. Fix: mount your ESP manually (typically /boot/efi) and re-run."
+    validate_esp_free_space "$esp_mount"
 }
 
 # =============================================================================
@@ -391,9 +476,61 @@ ESP_MOUNT_CANDIDATES=(
     /esp
 )
 
+ESP_GUID="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+ESP_MIN_AVAIL_BYTES=$((150 * 1024 * 1024))
+
 find_esp_device() {
-    lsblk -pnro PATH,PARTTYPE,FSTYPE 2>/dev/null \
-        | awk '$2=="c12a7328-f81f-11d2-ba4b-00a0c93ec93b" && tolower($3) ~ /fat|vfat/ {print $1; exit}'
+    local dev
+
+    dev=$(lsblk -pnro PATH,PARTTYPE,FSTYPE 2>/dev/null \
+        | awk -v esp_guid="$ESP_GUID" '$2==esp_guid && tolower($3) ~ /fat|vfat/ {print $1; exit}')
+    if [[ -n "$dev" ]]; then
+        echo "$dev"
+        return 0
+    fi
+
+    while read -r dev; do
+        [[ -n "$dev" ]] || continue
+        local part_entry_type fstype
+        part_entry_type=$(blkid -s PART_ENTRY_TYPE -o value "$dev" 2>/dev/null | tr 'A-Z' 'a-z')
+        fstype=$(blkid -s TYPE -o value "$dev" 2>/dev/null | tr 'A-Z' 'a-z')
+        [[ "$part_entry_type" == "$ESP_GUID" ]] || continue
+        [[ "$fstype" =~ ^(vfat|fat|fat32|msdos)$ ]] || continue
+        echo "$dev"
+        return 0
+    done < <(lsblk -pnro PATH,TYPE 2>/dev/null | awk '$2=="part" {print $1}')
+
+    return 1
+}
+
+is_valid_esp_partition() {
+    local dev="$1"
+    [[ -b "$dev" ]] || return 1
+
+    local parttype fstype
+    parttype=$(lsblk -pnro PARTTYPE "$dev" 2>/dev/null | head -1 | tr 'A-Z' 'a-z')
+    fstype=$(lsblk -pnro FSTYPE "$dev" 2>/dev/null | head -1 | tr 'A-Z' 'a-z')
+
+    if [[ "$parttype" != "$ESP_GUID" ]]; then
+        parttype=$(blkid -s PART_ENTRY_TYPE -o value "$dev" 2>/dev/null | tr 'A-Z' 'a-z')
+    fi
+    if [[ -z "$fstype" ]]; then
+        fstype=$(blkid -s TYPE -o value "$dev" 2>/dev/null | tr 'A-Z' 'a-z')
+    fi
+
+    [[ "$parttype" == "$ESP_GUID" ]] || return 1
+    [[ "$fstype" =~ ^(vfat|fat|fat32|msdos)$ ]] || return 1
+}
+
+validate_esp_free_space() {
+    local esp_mount="$1"
+    local avail_bytes
+    avail_bytes=$(df --output=avail -B1 "$esp_mount" 2>/dev/null | awk 'NR==2 {print $1}')
+    [[ "$avail_bytes" =~ ^[0-9]+$ ]] || die "ESP free-space check failed for ${esp_mount}. Checked via 'df --output=avail -B1'. Fix: verify ${esp_mount} is mounted and readable, then re-run."
+
+    if (( avail_bytes < ESP_MIN_AVAIL_BYTES )); then
+        die "ESP free-space check failed for ${esp_mount}. Available: ${avail_bytes} bytes; required: at least ${ESP_MIN_AVAIL_BYTES} bytes (~150MB). Fix: free space on the ESP or enlarge it, then re-run."
+    fi
 }
 
 find_mounted_esp_target() {
@@ -423,6 +560,7 @@ ensure_esp_mounted() {
 
     esp_mount=$(find_mounted_esp_target || true)
     if [[ -n "$esp_mount" ]]; then
+        validate_esp_free_space "$esp_mount"
         info "ESP mounted at ${esp_mount}"
         return 0
     fi
@@ -441,11 +579,13 @@ ensure_esp_mounted() {
 
     esp_dev=$(find_esp_device || true)
     if [[ -n "$esp_dev" ]]; then
+        is_valid_esp_partition "$esp_dev" || die "ESP detection found ${esp_dev}, but partition validation failed. Checked GUID (${ESP_GUID}) and FAT filesystem via lsblk/blkid. Fix: format the EFI System Partition as FAT32/vfat and ensure its GPT type is set to ESP."
         for candidate in "${ESP_MOUNT_CANDIDATES[@]}"; do
             mkdir -p "$candidate"
             if mount -t vfat "$esp_dev" "$candidate" &>/dev/null && findmnt "$candidate" &>/dev/null; then
                 esp_mount=$(find_mounted_esp_target || true)
                 if [[ -n "$esp_mount" ]]; then
+                    validate_esp_free_space "$esp_mount"
                     info "Mounted ESP device ${esp_dev} at ${esp_mount}"
                     return 0
                 fi
@@ -598,10 +738,15 @@ require_cmd ukify
 require_cmd lsinitrd
 require_cmd findmnt
 require_cmd lsblk
+require_cmd blkid
+require_cmd df
 require_cmd efibootmgr
 [[ -f "$KERNEL_IMG" ]] || die "Kernel image not found: ${KERNEL_IMG}"
 mkdir -p "$EFI_DIR"
 ensure_esp_mounted || die "ESP is not mounted and automatic mount failed. Checked: ${ESP_MOUNT_CANDIDATES[*]}"
+ESP_MOUNT_CHECK=$(find_mounted_esp_target || true)
+[[ -n "$ESP_MOUNT_CHECK" ]] || die "ESP mount verification failed after mount attempts. Checked candidates: ${ESP_MOUNT_CANDIDATES[*]}. Fix: mount your ESP manually (typically /boot/efi) and re-run."
+validate_esp_free_space "$ESP_MOUNT_CHECK"
 
 EFFECTIVE_CMDLINE=$(get_effective_cmdline)
 
