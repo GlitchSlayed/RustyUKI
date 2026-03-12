@@ -1,10 +1,10 @@
 # Fedora UKI Setup Script
 
-`uki-setup.sh` automates creation and lifecycle management of **Unified Kernel Images (UKIs)** on Fedora and other Linux systems that provide compatible `dracut` + `kernel-install` tooling.
+`uki-setup.sh` automates creation and lifecycle management of **Unified Kernel Images (UKIs)** on Fedora and other Linux systems that provide compatible `dracut` + `ukify` + `kernel-install` tooling.
 
 It performs a one-time setup that:
 
-- Installs required tooling (`dracut`, `efibootmgr`, `binutils`, `systemd-boot-unsigned`).
+- Installs required tooling (`dracut`, `ukify`, `lsinitrd`, `efibootmgr`, `binutils`).
 - Writes a UKI rebuild helper script to `/usr/local/sbin/uki-build.sh`.
 - Installs a `kernel-install` plugin that rebuilds/removes UKIs when kernels are added/removed.
 - Disables default Fedora kernel-install plugins that generate GRUB/BLS entries to avoid conflicts.
@@ -14,7 +14,7 @@ It performs a one-time setup that:
 
 ## What this is for
 
-A UKI bundles the kernel, initramfs, and kernel command line into one EFI executable. This can simplify boot flows and makes kernel updates predictable when combined with `kernel-install` hooks.
+A UKI bundles the kernel, initramfs, and kernel command line into one EFI executable. This setup now builds UKIs in two stages: dracut generates a standalone initramfs artifact first, then ukify assembles/signs the final EFI binary.
 
 This project is intended for systems booting in **UEFI mode** with a mounted **EFI System Partition (ESP)** (typically `/boot/efi`).
 
@@ -123,16 +123,36 @@ Default:
 AUTO_DETECT_CMDLINE=1
 ```
 
-### `EFI_STUB`
-Optional explicit path to the EFI stub used by dracut.
+### `UKIFY_SB_KEY` / `UKIFY_SB_CERT`
+Optional Secure Boot signing key/certificate paths. If both are set, ukify receives a temporary `[UKI]` config and signs as part of assembly.
 
 Default:
 
 ```bash
-EFI_STUB=""
+UKIFY_SB_KEY=""
+UKIFY_SB_CERT=""
 ```
 
-Leave empty to auto-detect common Fedora paths.
+Leave empty to build unsigned UKIs.
+
+### Initramfs validation controls
+The generated `uki-build.sh` validates the standalone initramfs **before** ukify is run:
+
+- runs `lsinitrd` and verifies `/init` exists
+- unpacks the initramfs (`lsinitrd --unpack`) and builds a normalized file list
+- optionally checks required/forbidden path lists
+- stores and compares manifests to catch regressions between builds of the same kernel
+
+Configuration keys in `uki-setup.sh` / generated `uki-build.sh`:
+
+```bash
+INITRAMFS_REQUIRED_LIST="/etc/uki/initramfs-required.txt"
+INITRAMFS_FORBIDDEN_LIST="/etc/uki/initramfs-forbidden.txt"
+INITRAMFS_STATE_DIR="/var/lib/uki-build"
+INITRAMFS_STRICT_DIFF=0
+```
+
+If `INITRAMFS_STRICT_DIFF=1`, content changes versus the previous manifest for that kernel fail the build early.
 
 ---
 
@@ -143,7 +163,7 @@ GitHub Actions now runs checks in a Fedora container (`fedora:41`) on every push
 
 - Bash syntax for `uki-setup.sh` and test scripts.
 - `shellcheck` linting.
-- A project check script that sources `uki-setup.sh` with `UKI_SETUP_SKIP_MAIN=1` and validates the generated helper/plugin templates.
+- A project check script that sources `uki-setup.sh` with `UKI_SETUP_SKIP_MAIN=1` and validates the generated helper/plugin templates and initramfs validation settings.
 
 Run the same checks locally with:
 
@@ -160,7 +180,7 @@ bash tests/test_uki_setup.sh
 Running `uki-setup.sh` creates/updates:
 
 - `/usr/local/sbin/uki-build.sh` — manual/automated UKI rebuild helper.
-- `/usr/lib/kernel/install.d/90-uki-dracut.install` — kernel-install plugin.
+- `/usr/lib/kernel/install.d/90-uki-ukify.install` — kernel-install plugin.
 - `/etc/kernel/install.d/*.install -> /dev/null` overrides for selected default plugins.
 
 ---
@@ -212,7 +232,7 @@ If you want to return to your previous boot flow, you can:
 1. Remove custom plugin and helper script:
 
 ```bash
-sudo rm -f /usr/lib/kernel/install.d/90-uki-dracut.install
+sudo rm -f /usr/lib/kernel/install.d/90-uki-ukify.install
 sudo rm -f /usr/local/sbin/uki-build.sh
 ```
 
@@ -236,8 +256,9 @@ sudo rm -f \
 - **UEFI not detected**: Ensure firmware boot mode is UEFI and that `efivars`/ESP are accessible.
 - **ESP not mounted**: The script now checks `/boot/efi`, `/efi`, `/boot`, `/boot/EFI`, and `/esp`, then attempts automatic mounting (via fstab first, then ESP partition detection). If that still fails, mount it manually and rerun.
 - **UKI fails to boot**: Re-check `CMDLINE` and storage-related boot args.
-- **Missing EFI stub**: Install your distro's systemd-boot package and verify stub path.
-- **No Secure Boot signing**: Install `sbsigntools`; this script only warns when absent.
+- **ukify missing**: Install your distro package that provides `ukify` (`systemd-ukify` on Fedora family systems).
+- **Initramfs validation fails**: inspect `lsinitrd` output, verify your required/forbidden list files, and review manifest diffs under `INITRAMFS_STATE_DIR`.
+- **No Secure Boot signing**: set both `UKIFY_SB_KEY` and `UKIFY_SB_CERT` in the generated build script.
 
 ---
 
