@@ -554,7 +554,7 @@ phase_deps() {
     hr
     info "Phase 2: Installing dependencies"
 
-    local pkgs=(dracut efibootmgr binutils)
+    local pkgs=(dracut efibootmgr binutils file)
 
     case "$PKG_MGR" in
         dnf) pkgs+=(systemd-ukify) ;;
@@ -1098,12 +1098,14 @@ UKI_OUT="${EFI_DIR}/linux-${KERNEL_VER}.efi"
 [[ $EUID -eq 0 ]] || die "Must run as root."
 require_cmd dracut
 require_cmd ukify
+require_cmd file
 require_cmd lsinitrd
 require_cmd findmnt
 require_cmd lsblk
 require_cmd blkid
 require_cmd df
 require_cmd efibootmgr
+require_cmd objdump
 require_cmd rpm
 [[ -f "$KERNEL_IMG" ]] || die "Kernel image not found: ${KERNEL_IMG}"
 mkdir -p "$EFI_DIR"
@@ -1161,7 +1163,81 @@ trap cleanup EXIT
 info "Stage 2/2: Assembling UKI via ukify: ${UKI_OUT}"
 ukify "${UKIFY_ARGS[@]}"
 
-info "UKI built successfully: ${UKI_OUT} ($(du -sh "$UKI_OUT" | cut -f1))"
+extract_uki_section_text() {
+    local image="$1" section="$2" hex
+    hex=$(objdump -s -j "$section" "$image" 2>/dev/null \
+        | awk '/^[[:space:]]*[0-9a-f]+[[:space:]]/ {for (i=2; i<=5; i++) if ($i ~ /^[0-9a-fA-F]{8}$/) printf "%s", $i}')
+    [[ -n "$hex" ]] || return 1
+    printf '%s' "$hex" | xxd -r -p | tr -d '\000' | tr -d '\r\n'
+}
+
+extract_ukify_inspect_field() {
+    local image="$1" key="$2" line value
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^[[:space:]]*${key}[[:space:]]*:[[:space:]]*(.+)$ ]]; then
+            value="${BASH_REMATCH[1]}"
+            value="${value%\"}"
+            value="${value#\"}"
+            printf '%s\n' "$value"
+            return 0
+        fi
+    done < <(ukify inspect "$image" 2>/dev/null || true)
+    return 1
+}
+
+verify_uki_post_build() {
+    local image="$1" kernel_ver="$2" intended_cmdline="$3"
+    local min_size_bytes=$((10 * 1024 * 1024))
+    local size_bytes file_desc file_fmt embedded_cmdline embedded_uname sha ts
+
+    [[ -e "$image" ]] || die "Post-build verification failed: UKI artifact is missing: ${image}"
+    [[ -s "$image" ]] || die "Post-build verification failed: UKI artifact is empty (0 bytes): ${image}"
+
+    size_bytes=$(stat -c '%s' "$image")
+    (( size_bytes > 0 )) || die "Post-build verification failed: UKI size is 0 bytes: ${image}"
+    (( size_bytes >= min_size_bytes )) || die "Post-build verification failed: UKI size ${size_bytes} bytes is below minimum threshold ${min_size_bytes} bytes."
+
+    file_desc=$(file -Lb "$image")
+    if [[ ! "$file_desc" =~ PE32 ]]; then
+        die "Post-build verification failed: file(1) does not report PE/COFF EFI image (${file_desc})."
+    fi
+
+    file_fmt=$(objdump -f "$image" 2>/dev/null | awk -F'file format ' 'NF>1 {print $2; exit}')
+    if [[ -z "$file_fmt" || ! "$file_fmt" =~ ^pei- ]]; then
+        die "Post-build verification failed: objdump reports unexpected file format '${file_fmt:-unknown}' (expected pei-*)."
+    fi
+
+    embedded_cmdline=""
+    if embedded_cmdline=$(extract_ukify_inspect_field "$image" "cmdline"); then
+        :
+    elif embedded_cmdline=$(extract_uki_section_text "$image" ".cmdline"); then
+        :
+    else
+        die "Post-build verification failed: unable to extract embedded cmdline via ukify inspect or objdump section parsing."
+    fi
+    [[ "$embedded_cmdline" == "$intended_cmdline" ]] \
+        || die "Post-build verification failed: embedded cmdline mismatch. Intended='${intended_cmdline}' Embedded='${embedded_cmdline}'"
+
+    embedded_uname=""
+    if embedded_uname=$(extract_ukify_inspect_field "$image" "uname"); then
+        :
+    elif embedded_uname=$(extract_uki_section_text "$image" ".uname"); then
+        :
+    else
+        die "Post-build verification failed: unable to extract embedded uname metadata via ukify inspect or objdump section parsing."
+    fi
+    [[ "$embedded_uname" == "$kernel_ver" ]] \
+        || die "Post-build verification failed: embedded uname mismatch. Expected='${kernel_ver}' Embedded='${embedded_uname}'"
+
+    sha=$(sha256sum "$image" | awk '{print $1}')
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    printf '%s kernel=%s uki=%s sha256=%s\n' "$ts" "$kernel_ver" "$image" "$sha" >> /var/log/uki-setup.log
+
+    info "Post-build verification passed: ${image} ($(du -sh "$image" | cut -f1)), sha256=${sha}"
+}
+
+info "Stage 3/3: Verifying UKI artifact integrity and metadata"
+verify_uki_post_build "$UKI_OUT" "$KERNEL_VER" "$EFFECTIVE_CMDLINE"
 
 # Register / refresh UEFI boot entry
 LABEL="Linux UKI ${KERNEL_VER}"

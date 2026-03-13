@@ -54,6 +54,11 @@ grep -q 'BOOT_SUCCESS_DIR="/var/lib/uki-ukify/boot-success"' "$BUILD_SCRIPT"
 grep -q 'list_installed_kernels()' "$BUILD_SCRIPT"
 grep -q 'reconcile_kernel_ukis()' "$BUILD_SCRIPT"
 grep -q 'if \[\[ "\${1:-}" == "--reconcile" \]\]' "$BUILD_SCRIPT"
+grep -q 'require_cmd file' "$BUILD_SCRIPT"
+grep -q 'require_cmd objdump' "$BUILD_SCRIPT"
+grep -q 'verify_uki_post_build()' "$BUILD_SCRIPT"
+grep -q 'Stage 3/3: Verifying UKI artifact integrity and metadata' "$BUILD_SCRIPT"
+grep -q '/var/log/uki-setup.log' "$BUILD_SCRIPT"
 
 phase_write_plugin
 
