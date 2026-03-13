@@ -136,7 +136,10 @@ extra_args = []
 extra_args = []
 "#;
         let cfg: AppConfig = toml::from_str(content).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(cfg.uki.cmdline_state_dir, std::path::PathBuf::from("/var/lib/uki-build"));
+        assert_eq!(
+            cfg.uki.cmdline_state_dir,
+            std::path::PathBuf::from("/var/lib/uki-build")
+        );
         assert_eq!(cfg.uki.cmdline_min_tokens, 3);
     }
 }

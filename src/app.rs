@@ -151,6 +151,31 @@ pub fn install(
     Ok(path)
 }
 
+/// Rebuilds UKIs for all installed kernels and prunes stale artifacts.
+pub fn reconcile(
+    runner: &dyn CommandRunner,
+    cfg: &AppConfig,
+    base: &GenerateSettings,
+) -> Result<()> {
+    let kernels = list_installed_kernels(runner)?;
+    for kernel in &kernels {
+        let mut settings = base.clone();
+        settings.kernel_version = kernel.clone();
+        let _ = generate(runner, cfg, &settings)?;
+    }
+
+    let removed = prune_stale_uki_artifacts(&base.output_dir, &kernels)?;
+    if !removed.is_empty() {
+        info!("Pruned {} stale UKI artifact(s)", removed.len());
+    }
+
+    runner
+        .run("bootctl", &["update"])
+        .context("bootctl update failed")?;
+
+    Ok(())
+}
+
 /// Reports current status and resolved paths.
 pub fn status(runner: &dyn CommandRunner, cfg: &AppConfig) -> Result<String> {
     let uname = runner

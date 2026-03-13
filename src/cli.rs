@@ -28,6 +28,10 @@ pub enum Commands {
     Generate(GenerateArgs),
     /// Generate UKI and run bootloader update/install step.
     Install(GenerateArgs),
+    /// Reconcile UKIs for all installed kernels and prune stale artifacts.
+    Reconcile,
+    /// Install kernel-install hook so reconcile runs on kernel updates.
+    InstallHook(InstallHookArgs),
     /// Show current operational status and resolved settings.
     Status,
 }
@@ -53,4 +57,16 @@ pub struct GenerateArgs {
     /// Optional os-release path override.
     #[arg(long)]
     pub os_release: Option<PathBuf>,
+}
+
+/// Options for installing the kernel-install hook.
+#[derive(Debug, Clone, Parser)]
+pub struct InstallHookArgs {
+    /// Destination path for the kernel-install plugin script.
+    #[arg(long, default_value = "/usr/lib/kernel/install.d/90-rustyuki.install")]
+    pub plugin_path: PathBuf,
+
+    /// Optional explicit path to the rustyuki binary to invoke from the hook.
+    #[arg(long)]
+    pub binary_path: Option<PathBuf>,
 }

@@ -212,6 +212,22 @@ sudo rustyuki install
 sudo rustyuki install --kernel-version "6.12.0-200.fc41.x86_64"
 ```
 
+#### `reconcile` — Rebuild all installed kernel UKIs and prune stale artifacts
+
+Rebuilds UKIs for every kernel reported by `rpm -q kernel`, prunes stale `linux-*.efi` entries in the output directory, and runs `bootctl update`.
+
+```bash
+sudo rustyuki reconcile
+```
+
+#### `install-hook` — Run reconcile automatically on kernel updates
+
+Installs a `kernel-install` plugin so `rustyuki reconcile` runs on kernel add/remove events.
+
+```bash
+sudo rustyuki install-hook
+```
+
 ---
 
 ## Example Workflow
