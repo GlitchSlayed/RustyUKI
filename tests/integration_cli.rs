@@ -18,6 +18,8 @@ mod dracut;
 mod efi;
 #[path = "../src/error.rs"]
 mod error;
+#[path = "../src/kernel.rs"]
+mod kernel;
 #[path = "../src/ukify.rs"]
 mod ukify;
 
@@ -27,9 +29,9 @@ use cmd::{CommandRunner, ProcessOutput};
 use config::AppConfig;
 use dracut::build_initramfs;
 use efi::{make_efi_loader_path, validate_esp_mount};
+use kernel::{prune_stale_uki_artifacts, resolve_cmdline, sanitize_cmdline};
 use ukify::{build_uki, UkifyParams};
 
-#[derive(Clone)]
 struct ExpectedCall {
     program: String,
     args: Vec<String>,
@@ -318,4 +320,42 @@ fn efi_helpers_validate_mount_and_convert_loader_path() {
     let loader = make_efi_loader_path(temp.path(), &temp.path().join("EFI/Linux/linux-6.11.4.efi"))
         .unwrap_or_else(|e| panic!("{e}"));
     assert_eq!(loader, "\\EFI\\Linux\\linux-6.11.4.efi");
+}
+
+#[test]
+fn cmdline_sanitization_and_resolution_match_legacy_expectations() {
+    let sanitized = sanitize_cmdline(
+        "BOOT_IMAGE=/vmlinuz-foo initrd=/initramfs.img root=UUID=abcd rw rd.driver.blacklist=nouveau quiet",
+    );
+    assert_eq!(sanitized, "root=UUID=abcd rw quiet");
+
+    let temp = TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+    let cmdline_file = temp.path().join("cmdline");
+    std::fs::write(&cmdline_file, "root=UUID=file rw").unwrap_or_else(|e| panic!("{e}"));
+
+    let resolved = resolve_cmdline(&cmdline_file, "root=UUID=fallback rw", false)
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(resolved, "root=UUID=fallback rw");
+}
+
+#[test]
+fn prune_removes_only_unknown_kernel_efis() {
+    let temp = TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+    let out = temp.path();
+
+    let keep = out.join("linux-6.11.0.efi");
+    let prune = out.join("linux-6.10.0.efi");
+    let other = out.join("README.txt");
+
+    std::fs::write(&keep, b"keep").unwrap_or_else(|e| panic!("{e}"));
+    std::fs::write(&prune, b"remove").unwrap_or_else(|e| panic!("{e}"));
+    std::fs::write(&other, b"other").unwrap_or_else(|e| panic!("{e}"));
+
+    let removed =
+        prune_stale_uki_artifacts(out, &["6.11.0".to_string()]).unwrap_or_else(|e| panic!("{e}"));
+
+    assert_eq!(removed, vec![prune.clone()]);
+    assert!(keep.exists());
+    assert!(!prune.exists());
+    assert!(other.exists());
 }

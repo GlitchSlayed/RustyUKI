@@ -3,6 +3,7 @@ use crate::cmd::CommandRunner;
 use crate::config::AppConfig;
 use crate::dracut::build_initramfs;
 use crate::efi::{register_boot_entry, validate_esp_mount};
+use crate::kernel::{list_installed_kernels, prune_stale_uki_artifacts, resolve_cmdline};
 use crate::ukify::{build_uki, UkifyParams};
 use anyhow::{Context, Result};
 use log::info;
@@ -93,13 +94,11 @@ pub fn generate(
         &cfg.dracut.extra_args,
     )?;
 
-    let cmdline = fs::read_to_string(&settings.cmdline_file).with_context(|| {
-        format!(
-            "failed reading cmdline file {}",
-            settings.cmdline_file.display()
-        )
-    })?;
-    let normalized_cmdline = cmdline.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized_cmdline = resolve_cmdline(
+        &settings.cmdline_file,
+        &cfg.uki.configured_cmdline,
+        cfg.uki.auto_detect_cmdline,
+    )?;
 
     let uki_path = settings
         .output_dir
@@ -131,6 +130,13 @@ pub fn install(
     settings: &GenerateSettings,
 ) -> Result<PathBuf> {
     let path = generate(runner, cfg, settings)?;
+
+    let installed = list_installed_kernels(runner)?;
+    let removed = prune_stale_uki_artifacts(&settings.output_dir, &installed)?;
+    if !removed.is_empty() {
+        info!("Pruned {} stale UKI artifact(s)", removed.len());
+    }
+
     info!("Updating bootloader via bootctl");
     runner
         .run("bootctl", &["update"])

@@ -25,6 +25,10 @@ pub struct UkiConfig {
     pub output_dir: PathBuf,
     /// Path to kernel command line file.
     pub cmdline_file: PathBuf,
+    /// Fallback kernel cmdline if auto detection fails.
+    pub configured_cmdline: String,
+    /// Whether to auto-detect cmdline from system sources.
+    pub auto_detect_cmdline: bool,
     /// Optional splash image.
     pub splash: String,
     /// Path to `os-release` file.
@@ -53,6 +57,8 @@ impl Default for AppConfig {
                 esp_path: PathBuf::from("/boot/efi"),
                 output_dir: PathBuf::from("/boot/efi/EFI/Linux"),
                 cmdline_file: PathBuf::from("/etc/kernel/cmdline"),
+                configured_cmdline: "root=UUID=REPLACE-ME rw quiet rhgb".to_string(),
+                auto_detect_cmdline: true,
                 splash: String::new(),
                 os_release: PathBuf::from("/etc/os-release"),
             },
@@ -93,6 +99,8 @@ kernel_version = "6.10.0"
 esp_path = "/boot/efi"
 output_dir = "/boot/efi/EFI/Linux"
 cmdline_file = "/etc/kernel/cmdline"
+configured_cmdline = "root=UUID=1234 rw quiet"
+auto_detect_cmdline = true
 splash = ""
 os_release = "/etc/os-release"
 
@@ -105,6 +113,7 @@ extra_args = ["--measure"]
 
         let cfg: AppConfig = toml::from_str(content).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(cfg.uki.kernel_version, "6.10.0");
+        assert!(cfg.uki.auto_detect_cmdline);
         assert_eq!(cfg.dracut.extra_args.len(), 2);
         assert_eq!(cfg.ukify.extra_args.len(), 1);
     }

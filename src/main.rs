@@ -7,6 +7,7 @@ mod config;
 mod dracut;
 mod efi;
 mod error;
+mod kernel;
 mod privilege;
 mod ukify;
 
