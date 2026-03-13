@@ -17,14 +17,26 @@ jobs:
         run: |
           dnf install -y \
             bash \
+            cargo \
+            gcc \
             coreutils \
             diffutils \
             findutils \
             grep \
+            rust \
             sed \
             util-linux \
             which \
             shellcheck
+
+      - name: Rust format check
+        run: cargo fmt --all --check
+
+      - name: Rust unit/integration tests
+        run: cargo test --all-targets --locked
+
+      - name: Rust compile check
+        run: cargo check --all-targets --locked
 
       - name: Bash syntax checks
         run: bash -n uki-setup.sh tests/test_uki_setup.sh
