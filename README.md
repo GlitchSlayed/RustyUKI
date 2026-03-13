@@ -44,7 +44,7 @@
 
 ## What is RustyUKI?
 
-RustyUKI is a Rust rewrite of the original `uki-setup.sh` script. It builds and installs [Unified Kernel Images (UKIs)](https://uapi-group.org/specifications/specs/unified_kernel_image/) using a two-stage pipeline:
+RustyUKI is the actively maintained implementation for this project, replacing the original `uki-setup.sh` flow. It builds and installs [Unified Kernel Images (UKIs)](https://uapi-group.org/specifications/specs/unified_kernel_image/) using a two-stage pipeline:
 
 1. **`dracut`** — generates the initramfs
 2. **`ukify`** — assembles the final PE/EFI binary
@@ -130,6 +130,18 @@ output_dir = "/boot/efi/EFI/Linux"
 # File containing kernel command line parameters — must not be empty
 cmdline_file = "/etc/kernel/cmdline"
 
+# Fallback cmdline when auto detection cannot find a usable value
+configured_cmdline = "root=UUID=REPLACE-ME rw quiet rhgb"
+
+# Enable cmdline auto-detection from /proc/cmdline, then cmdline_file
+auto_detect_cmdline = true
+
+# Metadata directory for detected cmdline state
+cmdline_state_dir = "/var/lib/uki-build"
+
+# Warn if cmdline has fewer tokens than this
+cmdline_min_tokens = 3
+
 # Optional: path to a splash/logo image to embed
 splash = ""
 
@@ -198,6 +210,22 @@ Identical to `generate`, followed by `bootctl update` to synchronise the ESP.
 ```bash
 sudo rustyuki install
 sudo rustyuki install --kernel-version "6.12.0-200.fc41.x86_64"
+```
+
+#### `reconcile` — Rebuild all installed kernel UKIs and prune stale artifacts
+
+Rebuilds UKIs for every kernel reported by `rpm -q kernel`, prunes stale `linux-*.efi` entries in the output directory, and runs `bootctl update`.
+
+```bash
+sudo rustyuki reconcile
+```
+
+#### `install-hook` — Run reconcile automatically on kernel updates
+
+Installs a `kernel-install` plugin so `rustyuki reconcile` runs on kernel add/remove events.
+
+```bash
+sudo rustyuki install-hook
 ```
 
 ---
@@ -418,13 +446,12 @@ RustyUKI/
 ├── tests/                # Integration tests
 ├── .github/
 │   └── workflows/        # CI pipelines
-├── uki-setup.sh          # Legacy shell script (reference only, unmaintained)
 ├── Cargo.toml
 └── README.md
 ```
 
 > [!NOTE]
-> The original `uki-setup.sh` remains in the repository as a migration reference. It is no longer maintained and will not receive fixes.
+> Legacy shell-script implementation has been removed; all supported behavior now lives in the Rust CLI.
 
 ---
 

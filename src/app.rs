@@ -3,6 +3,9 @@ use crate::cmd::CommandRunner;
 use crate::config::AppConfig;
 use crate::dracut::build_initramfs;
 use crate::efi::{register_boot_entry, validate_esp_mount};
+use crate::kernel::{
+    list_installed_kernels, prune_stale_uki_artifacts, resolve_cmdline, CmdlineSettings,
+};
 use crate::ukify::{build_uki, UkifyParams};
 use anyhow::{Context, Result};
 use log::info;
@@ -93,13 +96,16 @@ pub fn generate(
         &cfg.dracut.extra_args,
     )?;
 
-    let cmdline = fs::read_to_string(&settings.cmdline_file).with_context(|| {
-        format!(
-            "failed reading cmdline file {}",
-            settings.cmdline_file.display()
-        )
-    })?;
-    let normalized_cmdline = cmdline.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized_cmdline = resolve_cmdline(
+        runner,
+        &CmdlineSettings {
+            configured_cmdline: cfg.uki.configured_cmdline.clone(),
+            auto_detect: cfg.uki.auto_detect_cmdline,
+            cmdline_file: settings.cmdline_file.clone(),
+            state_dir: cfg.uki.cmdline_state_dir.clone(),
+            cmdline_min_tokens: cfg.uki.cmdline_min_tokens,
+        },
+    )?;
 
     let uki_path = settings
         .output_dir
@@ -131,11 +137,43 @@ pub fn install(
     settings: &GenerateSettings,
 ) -> Result<PathBuf> {
     let path = generate(runner, cfg, settings)?;
+
+    let installed = list_installed_kernels(runner)?;
+    let removed = prune_stale_uki_artifacts(&settings.output_dir, &installed)?;
+    if !removed.is_empty() {
+        info!("Pruned {} stale UKI artifact(s)", removed.len());
+    }
+
     info!("Updating bootloader via bootctl");
     runner
         .run("bootctl", &["update"])
         .context("bootctl update failed")?;
     Ok(path)
+}
+
+/// Rebuilds UKIs for all installed kernels and prunes stale artifacts.
+pub fn reconcile(
+    runner: &dyn CommandRunner,
+    cfg: &AppConfig,
+    base: &GenerateSettings,
+) -> Result<()> {
+    let kernels = list_installed_kernels(runner)?;
+    for kernel in &kernels {
+        let mut settings = base.clone();
+        settings.kernel_version = kernel.clone();
+        let _ = generate(runner, cfg, &settings)?;
+    }
+
+    let removed = prune_stale_uki_artifacts(&base.output_dir, &kernels)?;
+    if !removed.is_empty() {
+        info!("Pruned {} stale UKI artifact(s)", removed.len());
+    }
+
+    runner
+        .run("bootctl", &["update"])
+        .context("bootctl update failed")?;
+
+    Ok(())
 }
 
 /// Reports current status and resolved paths.
