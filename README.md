@@ -44,7 +44,7 @@
 
 ## What is RustyUKI?
 
-RustyUKI is the actively maintained implementation for this project, replacing the original `uki-setup.sh` flow. It builds and installs [Unified Kernel Images (UKIs)](https://uapi-group.org/specifications/specs/unified_kernel_image/) using a two-stage pipeline:
+RustyUKI builds and installs [Unified Kernel Images (UKIs)](https://uapi-group.org/specifications/specs/unified_kernel_image/) using a two-stage pipeline:
 
 1. **`dracut`** — generates the initramfs
 2. **`ukify`** — assembles the final PE/EFI binary
@@ -59,6 +59,8 @@ The resulting UKI is a single self-contained EFI executable that bundles your ke
 | Secure Boot | Complex, per-binary | Single signed blob |
 | Boot management | `grub-mkconfig` | `bootctl` / `efibootmgr` |
 | Reproducibility | Config-dependent | Atomic, versioned artifacts |
+
+Also.........Huge theoretical boot speed improvements.
 
 ---
 
