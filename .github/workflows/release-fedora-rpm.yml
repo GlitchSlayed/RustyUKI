@@ -1,0 +1,138 @@
+name: Release Fedora RPM
+
+on:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: Force a build even when no commits were added since the last RPM release
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:41
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          dnf -y update
+          dnf -y install \
+            git \
+            rpm-build \
+            rpmdevtools \
+            cargo \
+            rust \
+            cargo-rpm-macros \
+            rust-packaging \
+            gh \
+            jq
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decide whether a build is needed
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          FORCE_BUILD: ${{ github.event.inputs.force_build || 'false' }}
+        run: |
+          set -euo pipefail
+
+          latest_tag="$(gh api repos/${GITHUB_REPOSITORY}/releases --jq '[.[] | select(.tag_name | startswith("rpm-nightly-"))][0].tag_name' || true)"
+          head_sha="$(git rev-parse HEAD)"
+
+          should_build=false
+          reason=""
+
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" && "${FORCE_BUILD}" == "true" ]]; then
+            should_build=true
+            reason="manual force build"
+          elif [[ -z "${latest_tag}" || "${latest_tag}" == "null" ]]; then
+            should_build=true
+            reason="no previous rpm-nightly release"
+          else
+            last_sha="$(git rev-list -n 1 "${latest_tag}")"
+            if [[ "${head_sha}" != "${last_sha}" ]]; then
+              should_build=true
+              reason="new commits since ${latest_tag}"
+            else
+              reason="no new commits since ${latest_tag}"
+            fi
+          fi
+
+          release_tag="rpm-nightly-$(date -u +%Y%m%d)"
+
+          {
+            echo "latest_tag=${latest_tag}"
+            echo "head_sha=${head_sha}"
+            echo "should_build=${should_build}"
+            echo "reason=${reason}"
+            echo "release_tag=${release_tag}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Build decision: ${should_build} (${reason})"
+
+      - name: Stop early when there are no new commits
+        if: steps.plan.outputs.should_build != 'true'
+        run: |
+          echo "Skipping build: ${{ steps.plan.outputs.reason }}"
+
+      - name: Build SRPM/RPM using Fedora rpm macros
+        if: steps.plan.outputs.should_build == 'true'
+        run: |
+          set -euo pipefail
+
+          version="$(awk -F '"' '/^version = / {print $2; exit}' Cargo.toml)"
+          topdir="$(rpm --eval '%{_topdir}')"
+
+          rpmdev-setuptree
+
+          archive_dir="rustyuki-${version}"
+          tarball="${archive_dir}.tar.gz"
+
+          git archive --format=tar.gz --prefix="${archive_dir}/" -o "${topdir}/SOURCES/${tarball}" HEAD
+          cp .github/rpm/rustyuki.spec "${topdir}/SPECS/rustyuki.spec"
+
+          sed -i "s/^Version:.*/Version:        ${version}/" "${topdir}/SPECS/rustyuki.spec"
+
+          rpmbuild -ba "${topdir}/SPECS/rustyuki.spec"
+
+          mkdir -p dist
+          find "${topdir}/RPMS" -type f -name '*.rpm' -exec cp {} dist/ \;
+          find "${topdir}/SRPMS" -type f -name '*.src.rpm' -exec cp {} dist/ \;
+
+      - name: Upload RPM artifacts
+        if: steps.plan.outputs.should_build == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: fedora-rpm-${{ steps.plan.outputs.release_tag }}
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Create GitHub release for RPMs
+        if: steps.plan.outputs.should_build == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.plan.outputs.release_tag }}
+          target_commitish: ${{ steps.plan.outputs.head_sha }}
+          name: Fedora RPM build ${{ steps.plan.outputs.release_tag }}
+          generate_release_notes: true
+          files: dist/*
+          body: |
+            Automated Fedora RPM build.
+
+            - Trigger: `${{ github.event_name }}`
+            - Reason: `${{ steps.plan.outputs.reason }}`
+            - Commit: `${{ steps.plan.outputs.head_sha }}`
+            - Previous RPM tag: `${{ steps.plan.outputs.latest_tag || 'none' }}`
