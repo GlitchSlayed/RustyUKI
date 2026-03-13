@@ -1,0 +1,19 @@
+[package]
+name = "rustyuki"
+version = "0.2.0"
+edition = "2021"
+description = "RustyUKI: Rust CLI to generate/install Fedora UKIs via dracut + ukify"
+license = "MIT"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "1"
+log = "0.4"
+env_logger = "0.11"
+nix = { version = "0.29", features = ["user"] }
+
+[dev-dependencies]
+tempfile = "3"
