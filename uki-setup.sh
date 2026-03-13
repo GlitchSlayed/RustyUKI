@@ -72,6 +72,7 @@ INSTALL_PLUGIN="/usr/lib/kernel/install.d/90-uki-ukify.install"
 BACKUP_ROOT="/var/backups/uki-setup"
 PKG_MGR=""
 PKG_INSTALL_CMD=()
+DRY_RUN=0
 
 # Colour helpers
 _c() { printf '\e[%sm' "$1"; }
@@ -603,6 +604,9 @@ INITRAMFS_STATE_DIR="__INITRAMFS_STATE_DIR__"
 INITRAMFS_STRICT_DIFF=__INITRAMFS_STRICT_DIFF__
 CMDLINE_MIN_TOKENS=__CMDLINE_MIN_TOKENS__
 BOOT_SUCCESS_DIR="/var/lib/uki-ukify/boot-success"
+BACKUP_ROOT="/var/backups/uki-setup"
+EFI_AUDIT_LOG="/var/log/uki-efi-audit.log"
+DRY_RUN=0
 # ─────────────────────────────────────────────────────────────────────────────
 
 RED='\e[31;1m'; GRN='\e[32;1m'; YLW='\e[33;1m'; RST='\e[0m'
@@ -627,24 +631,95 @@ list_installed_kernels() {
     done < <(rpm -q kernel 2>/dev/null)
 }
 
+audit_efi_event() {
+    local msg="$1" ts
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    printf '%s %s\n' "$ts" "$msg" >> "$EFI_AUDIT_LOG"
+}
+
+log_or_run() {
+    local msg="$1"
+    shift
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        info "[dry-run] ${msg}"
+        audit_efi_event "DRY-RUN ${msg}"
+    else
+        "$@"
+    fi
+}
+
+backup_efibootmgr_snapshot() {
+    local reason="$1" snapshot_dir snapshot_file ts
+    snapshot_dir="${BACKUP_ROOT}/efibootmgr"
+    ts=$(date -u +%Y%m%dT%H%M%SZ)
+    snapshot_file="${snapshot_dir}/efibootmgr-${reason}-${ts}.txt"
+    mkdir -p "$snapshot_dir"
+
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        info "[dry-run] Would save efibootmgr -v backup to ${snapshot_file}"
+        audit_efi_event "DRY-RUN backup efibootmgr -v to ${snapshot_file}"
+        return 0
+    fi
+
+    efibootmgr -v > "$snapshot_file"
+    info "Saved efibootmgr snapshot: ${snapshot_file}"
+    audit_efi_event "Saved efibootmgr snapshot ${snapshot_file}"
+}
+
+bootorder_has_alternate_entry() {
+    local boot_num="$1" bootorder_raw candidate
+    bootorder_raw=$(efibootmgr | sed -n 's/^BootOrder: *//p' | head -1)
+    [[ -n "$bootorder_raw" ]] || return 1
+
+    IFS=',' read -ra order_entries <<< "$bootorder_raw"
+    for candidate in "${order_entries[@]}"; do
+        candidate=$(echo "$candidate" | tr -d '[:space:]' | tr 'a-z' 'A-Z')
+        [[ -z "$candidate" ]] && continue
+        if [[ "$candidate" != "${boot_num^^}" ]]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+find_bootnums_by_label() {
+    local label="$1"
+    efibootmgr 2>/dev/null \
+        | grep -F "* ${label}" \
+        | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\).*/\1/p' \
+        || true
+}
+
+prune_boot_entries_by_label() {
+    local label="$1" keep_bootnum="${2:-}" boot_num
+    while IFS= read -r boot_num; do
+        [[ -n "$boot_num" ]] || continue
+        if [[ -n "$keep_bootnum" && "${boot_num^^}" == "${keep_bootnum^^}" ]]; then
+            continue
+        fi
+        if ! bootorder_has_alternate_entry "$boot_num"; then
+            warn "Skipping EFI deletion for Boot${boot_num} (${label}): no alternate BootOrder entry would remain."
+            audit_efi_event "GUARD skip delete Boot${boot_num} label='${label}' no alternate BootOrder entry"
+            continue
+        fi
+        backup_efibootmgr_snapshot "before-delete-${boot_num}"
+        log_or_run "Delete EFI entry Boot${boot_num} (${label})" \
+            efibootmgr --quiet --bootnum "$boot_num" --delete-bootnum
+        audit_efi_event "Deleted EFI entry Boot${boot_num} label='${label}'"
+    done < <(find_bootnums_by_label "$label" | sort -u)
+}
+
 delete_uki_and_entry() {
-    local kernel_ver="$1" uki label boot_num
+    local kernel_ver="$1" uki label
 
     uki="${EFI_DIR}/linux-${kernel_ver}.efi"
     if [[ -f "$uki" ]]; then
-        rm -f "$uki"
-        info "Removed stale UKI: ${uki}"
+        log_or_run "Remove stale UKI ${uki}" rm -f "$uki"
+        audit_efi_event "Removed stale UKI ${uki}"
     fi
 
     label="Linux UKI ${kernel_ver}"
-    boot_num=$(efibootmgr 2>/dev/null \
-        | grep -F "* ${label}" \
-        | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\).*/\1/p' \
-        || true)
-    if [[ -n "$boot_num" ]]; then
-        efibootmgr --quiet --bootnum "$boot_num" --delete-bootnum
-        info "Removed stale EFI entry Boot${boot_num} (${label})"
-    fi
+    prune_boot_entries_by_label "$label"
 }
 
 reconcile_kernel_ukis() {
@@ -666,7 +741,11 @@ reconcile_kernel_ukis() {
     fi
 
     for kernel_ver in "${installed_kernels[@]}"; do
-        "$0" "$kernel_ver"
+        if [[ "$DRY_RUN" -eq 1 ]]; then
+            "$0" --dry-run "$kernel_ver"
+        else
+            "$0" "$kernel_ver"
+        fi
         built_kernels+=("$kernel_ver")
     done
 
@@ -1081,19 +1160,47 @@ validate_initramfs_artifact() {
     fi
 }
 
-if [[ "${1:-}" == "--reconcile" ]]; then
-    [[ $EUID -eq 0 ]] || die "Must run as root."
-    require_cmd rpm
-    require_cmd efibootmgr
-    mkdir -p "$EFI_DIR" "$BOOT_SUCCESS_DIR"
-    reconcile_kernel_ukis
-    exit 0
-fi
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dry-run)
+            DRY_RUN=1
+            ;;
+        --reconcile)
+            RECONCILE_MODE=1
+            ;;
+        -h|--help)
+            cat <<'EOF'
+Usage: uki-build.sh [--dry-run] [--reconcile] [kernel-version]
+EOF
+            exit 0
+            ;;
+        --*)
+            die "Unknown option: $1"
+            ;;
+        *)
+            if [[ -n "${KERNEL_VER_ARG:-}" ]]; then
+                die "Only one kernel version argument is allowed."
+            fi
+            KERNEL_VER_ARG="$1"
+            ;;
+    esac
+    shift
+done
 
-KERNEL_VER="${1:-$(uname -r)}"
+KERNEL_VER="${KERNEL_VER_ARG:-$(uname -r)}"
 KERNEL_IMG="/lib/modules/${KERNEL_VER}/vmlinuz"
 INITRD_OUT="/tmp/initramfs-${KERNEL_VER}.img"
 UKI_OUT="${EFI_DIR}/linux-${KERNEL_VER}.efi"
+
+if [[ "${RECONCILE_MODE:-0}" -eq 1 ]]; then
+    [[ $EUID -eq 0 ]] || die "Must run as root."
+    require_cmd rpm
+    require_cmd efibootmgr
+    mkdir -p "$EFI_DIR" "$BOOT_SUCCESS_DIR" "$BACKUP_ROOT"
+    [[ "$DRY_RUN" -eq 1 ]] && info "Dry-run enabled for reconcile mode."
+    reconcile_kernel_ukis
+    exit 0
+fi
 
 [[ $EUID -eq 0 ]] || die "Must run as root."
 require_cmd dracut
@@ -1108,7 +1215,7 @@ require_cmd efibootmgr
 require_cmd objdump
 require_cmd rpm
 [[ -f "$KERNEL_IMG" ]] || die "Kernel image not found: ${KERNEL_IMG}"
-mkdir -p "$EFI_DIR"
+mkdir -p "$EFI_DIR" "$BACKUP_ROOT" "$(dirname "$EFI_AUDIT_LOG")"
 ensure_esp_mounted || die "ESP is not mounted and automatic mount failed. Checked: ${ESP_MOUNT_CANDIDATES[*]}"
 ESP_MOUNT_CHECK=$(find_mounted_esp_target || true)
 [[ -n "$ESP_MOUNT_CHECK" ]] || die "ESP mount verification failed after mount attempts. Checked candidates: ${ESP_MOUNT_CANDIDATES[*]}. Fix: mount your ESP manually (typically /boot/efi) and re-run."
@@ -1119,9 +1226,12 @@ EFFECTIVE_CMDLINE=$(get_effective_cmdline)
 cleanup_items=("$INITRD_OUT")
 
 info "Stage 1/2: Building standalone initramfs via dracut: ${INITRD_OUT}"
-dracut --force --kver "$KERNEL_VER" "$INITRD_OUT"
-
-validate_initramfs_artifact
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "[dry-run] Would run: dracut --force --kver ${KERNEL_VER} ${INITRD_OUT}"
+else
+    dracut --force --kver "$KERNEL_VER" "$INITRD_OUT"
+    validate_initramfs_artifact
+fi
 
 UKIFY_ARGS=(
     build
@@ -1161,7 +1271,11 @@ cleanup() {
 trap cleanup EXIT
 
 info "Stage 2/2: Assembling UKI via ukify: ${UKI_OUT}"
-ukify "${UKIFY_ARGS[@]}"
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "[dry-run] Would run: ukify ${UKIFY_ARGS[*]}"
+else
+    ukify "${UKIFY_ARGS[@]}"
+fi
 
 extract_uki_section_text() {
     local image="$1" section="$2" hex
@@ -1236,8 +1350,12 @@ verify_uki_post_build() {
     info "Post-build verification passed: ${image} ($(du -sh "$image" | cut -f1)), sha256=${sha}"
 }
 
-info "Stage 3/3: Verifying UKI artifact integrity and metadata"
-verify_uki_post_build "$UKI_OUT" "$KERNEL_VER" "$EFFECTIVE_CMDLINE"
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "[dry-run] Would verify UKI artifact: ${UKI_OUT}"
+else
+    info "Stage 3/3: Verifying UKI artifact integrity and metadata"
+    verify_uki_post_build "$UKI_OUT" "$KERNEL_VER" "$EFFECTIVE_CMDLINE"
+fi
 
 # Register / refresh UEFI boot entry
 LABEL="Linux UKI ${KERNEL_VER}"
@@ -1253,23 +1371,36 @@ ESP_PART_NUM=$(cat "/sys/class/block/${ESP_DEV_NAME}/partition" 2>/dev/null)    
 REL_PATH="${UKI_OUT#${ESP_MOUNT}}"          # strip ESP mount prefix
 REL_PATH_BS="${REL_PATH//\//\\}"            # forward→backslash
 
-# Remove any existing entry with the same label
-OLD_NUM=$(efibootmgr 2>/dev/null \
-    | grep -F "* ${LABEL}" \
-    | sed -n 's/^Boot\([0-9A-Fa-f]\{4\}\).*/\1/p' \
-    || true)
-if [[ -n "$OLD_NUM" ]]; then
-    info "Removing stale EFI entry Boot${OLD_NUM}…"
-    efibootmgr --quiet --bootnum "$OLD_NUM" --delete-bootnum
-fi
+mkdir -p "$BACKUP_ROOT" "$(dirname "$EFI_AUDIT_LOG")"
+audit_efi_event "Start EFI registration label='${LABEL}' loader='${REL_PATH_BS}' kernel='${KERNEL_VER}' dry_run=${DRY_RUN}"
 
 info "Registering UEFI entry: '${LABEL}'"
-efibootmgr --quiet \
-    --create \
-    --disk    "/dev/${ESP_DISK_NAME}" \
-    --part    "$ESP_PART_NUM" \
-    --label   "$LABEL" \
-    --loader  "$REL_PATH_BS"
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "[dry-run] Would run: efibootmgr --create --disk /dev/${ESP_DISK_NAME} --part ${ESP_PART_NUM} --label '${LABEL}' --loader '${REL_PATH_BS}'"
+    audit_efi_event "DRY-RUN create EFI entry label='${LABEL}' disk='/dev/${ESP_DISK_NAME}' part='${ESP_PART_NUM}' loader='${REL_PATH_BS}'"
+else
+    efibootmgr --quiet \
+        --create \
+        --disk    "/dev/${ESP_DISK_NAME}" \
+        --part    "$ESP_PART_NUM" \
+        --label   "$LABEL" \
+        --loader  "$REL_PATH_BS"
+    audit_efi_event "Created EFI entry label='${LABEL}'"
+fi
+
+NEW_ENTRY_NUM=$(find_bootnums_by_label "$LABEL" | head -1 || true)
+if [[ "$DRY_RUN" -eq 1 ]]; then
+    info "[dry-run] Would validate efibootmgr contains label '${LABEL}'"
+    audit_efi_event "DRY-RUN validate EFI entry label='${LABEL}'"
+elif [[ -z "$NEW_ENTRY_NUM" ]]; then
+    audit_efi_event "VALIDATION FAIL missing EFI entry label='${LABEL}'"
+    die "EFI registration validation failed: label '${LABEL}' not present after create."
+else
+    info "Validated EFI entry Boot${NEW_ENTRY_NUM} (${LABEL})"
+    audit_efi_event "VALIDATION PASS Boot${NEW_ENTRY_NUM} label='${LABEL}'"
+fi
+
+prune_boot_entries_by_label "$LABEL" "$NEW_ENTRY_NUM"
 
 info "Done. Run 'efibootmgr -v' to verify."
 BUILDBODY
@@ -1404,7 +1535,11 @@ phase_initial_build() {
 
     for kernel_ver in "${kernels[@]}"; do
         info "Building UKI for kernel: ${kernel_ver}"
-        "$BUILD_SCRIPT" "$kernel_ver"
+        if [[ "$DRY_RUN" -eq 1 ]]; then
+            "$BUILD_SCRIPT" --dry-run "$kernel_ver"
+        else
+            "$BUILD_SCRIPT" "$kernel_ver"
+        fi
     done
 
     info "Initial UKI build complete for ${#kernels[@]} installed kernel(s)."
@@ -1456,7 +1591,33 @@ phase_summary() {
 # Main
 # =============================================================================
 
+parse_cli_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --dry-run)
+                DRY_RUN=1
+                ;;
+            -h|--help)
+                cat <<'EOF'
+Usage: uki-setup.sh [--dry-run]
+
+Options:
+  --dry-run   Print intended setup/build operations without executing destructive build/EFI mutations.
+  -h, --help  Show this help.
+EOF
+                exit 0
+                ;;
+            *)
+                die "Unknown option: $1"
+                ;;
+        esac
+        shift
+    done
+}
+
 if [[ "${UKI_SETUP_SKIP_MAIN:-0}" -ne 1 ]]; then
+    parse_cli_args "$@"
+    [[ "$DRY_RUN" -eq 1 ]] && info "Dry-run mode enabled. Build script invocations will use --dry-run."
     phase_preflight
     phase_deps
     phase_write_build_script
