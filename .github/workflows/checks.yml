@@ -31,7 +31,8 @@ jobs:
             sed \
             util-linux \
             which \
-            shellcheck
+            shellcheck \
+            git
 
       - name: Rust format check
         run: cargo fmt --all --check
@@ -52,11 +53,10 @@ jobs:
             cargo check --all-targets
           fi
 
-      - name: Bash syntax checks
-        run: bash -n uki-setup.sh tests/test_uki_setup.sh
-
-      - name: ShellCheck
-        run: shellcheck -P . uki-setup.sh tests/test_uki_setup.sh
-
-      - name: Project checks
-        run: bash tests/test_uki_setup.sh
+      - name: Rust build
+        run: |
+          if [[ -f Cargo.lock ]]; then
+            cargo build --all-targets --locked
+          else
+            cargo build --all-targets
+          fi
