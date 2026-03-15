@@ -1,6 +1,11 @@
-name: Release Fedora RPM
+name: Fedora RPM
 
 on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
   schedule:
     - cron: '17 3 * * *'
   workflow_dispatch:
@@ -18,7 +23,60 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
-  build-and-release:
+  rpm-ci:
+    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:41
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          dnf -y update
+          dnf -y install \
+            git \
+            rpm-build \
+            rpmdevtools \
+            cargo \
+            rust \
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Mark workspace as a safe Git directory
+        run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+
+      - name: Build SRPM/RPM
+        run: |
+          set -euo pipefail
+
+          version="$(awk -F '"' '/^version = / {print $2; exit}' Cargo.toml)"
+          topdir="$(rpm --eval '%{_topdir}')"
+
+          rpmdev-setuptree
+
+          archive_dir="rustyuki-${version}"
+          tarball="${archive_dir}.tar.gz"
+
+          git archive --format=tar.gz --prefix="${archive_dir}/" -o "${topdir}/SOURCES/${tarball}" HEAD
+          cp .github/rpm/rustyuki.spec "${topdir}/SPECS/rustyuki.spec"
+          sed -i "s/^Version:.*/Version:        ${version}/" "${topdir}/SPECS/rustyuki.spec"
+
+          rpmbuild -ba "${topdir}/SPECS/rustyuki.spec"
+
+          mkdir -p dist
+          find "${topdir}/RPMS" -type f -name '*.rpm' -exec cp {} dist/ \;
+          find "${topdir}/SRPMS" -type f -name '*.src.rpm' -exec cp {} dist/ \;
+
+      - name: Upload RPM artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: fedora-rpm-ci-${{ github.run_number }}
+          path: dist/*
+          if-no-files-found: error
+
+  rpm-release:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     container:
       image: fedora:41
