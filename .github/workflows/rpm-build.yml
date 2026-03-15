@@ -31,7 +31,8 @@ jobs:
             cargo \
             rust \
             cargo-rpm-macros \
-            rust-packaging
+            rust-packaging \
+            dnf-plugins-core
 
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -54,6 +55,14 @@ jobs:
           git archive --format=tar.gz --prefix="${archive_dir}/" -o "${topdir}/SOURCES/${tarball}" HEAD
           cp .github/rpm/rustyuki.spec "${topdir}/SPECS/rustyuki.spec"
           sed -i "s/^Version:.*/Version:        ${version}/" "${topdir}/SPECS/rustyuki.spec"
+
+          rpmbuild -br "${topdir}/SPECS/rustyuki.spec"
+          buildreq_rpm="$(find "${topdir}/SRPMS" -maxdepth 1 -type f -name "*.buildreqs.nosrc.rpm" | head -n 1)"
+          if [[ -z "${buildreq_rpm}" ]]; then
+            echo "failed to locate generated buildreqs rpm" >&2
+            exit 1
+          fi
+          dnf -y builddep "${buildreq_rpm}"
 
           rpmbuild -ba "${topdir}/SPECS/rustyuki.spec"
 

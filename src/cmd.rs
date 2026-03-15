@@ -10,6 +10,7 @@ pub struct ProcessOutput {
     /// Captured standard output.
     pub stdout: String,
     /// Captured standard error.
+    #[allow(dead_code)]
     pub stderr: String,
 }
 
