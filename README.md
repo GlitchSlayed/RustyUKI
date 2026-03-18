@@ -31,6 +31,7 @@
 - [Installation](#installation)
 - [Configuration](#configuration)
 - [Usage](#usage)
+- [Safer First Boot Workflow](#safer-first-boot-workflow)
 - [Example Workflow](#example-workflow)
 - [⚠️ Backups & Recovery](#%EF%B8%8F-backups--recovery)
 - [⚠️ Warnings & Known Failure Modes](#%EF%B8%8F-warnings--known-failure-modes)
@@ -203,8 +204,11 @@ Output is written atomically (temp file → rename) to prevent partial writes fr
 ```bash
 sudo rustyuki generate
 sudo rustyuki generate --kernel-version "$(uname -r)"
+sudo rustyuki generate --boot-once
 sudo rustyuki generate --dry-run   # preview only
 ```
+
+Use `--boot-once` when you want firmware to trial the new UKI exactly once via `efibootmgr --bootnext` before you make it permanent with `rustyuki confirm`.
 
 #### `install` — Generate and sync the ESP
 
@@ -215,12 +219,26 @@ sudo rustyuki install
 sudo rustyuki install --kernel-version "6.12.0-200.fc41.x86_64"
 ```
 
+Add `--boot-once` to schedule the new EFI entry as the next boot only via `efibootmgr --bootnext`, leaving your permanent `BootOrder` unchanged until you confirm the trial boot succeeded. The same flag is available on `generate` if you only want to register the UKI entry without running `bootctl update`.
+
+```bash
+sudo rustyuki install --boot-once
+```
+
 #### `reconcile` — Rebuild all installed kernel UKIs and prune stale artifacts
 
 Rebuilds UKIs for every kernel reported by `rpm -q kernel`, prunes stale `linux-*.efi` entries in the output directory, and runs `bootctl update`.
 
 ```bash
 sudo rustyuki reconcile
+```
+
+#### `confirm` — Make a successful trial boot permanent
+
+After booting the one-time UKI successfully, run `confirm` from that booted system. RustyUKI reads `BootCurrent` and moves that entry to the front of `BootOrder`, making the tested UKI your permanent default.
+
+```bash
+sudo rustyuki confirm
 ```
 
 #### `install-hook` — Run reconcile automatically on kernel updates
@@ -232,6 +250,23 @@ sudo rustyuki install-hook
 ```
 
 ---
+
+## Safer First Boot Workflow
+
+For first-time GRUB replacement or any risky UKI change, prefer a one-time boot trial instead of immediately changing your permanent firmware boot order.
+
+```bash
+# Build the UKI, refresh the ESP, and schedule it for the next boot only
+sudo rustyuki install --boot-once
+
+# Reboot normally; firmware will use BootNext exactly once
+sudo reboot
+
+# If the system came back successfully from the UKI, make it permanent
+sudo rustyuki confirm
+```
+
+This workflow keeps your existing default entry in `BootOrder` as the fallback if the trial boot fails, while still letting you verify the UKI end-to-end before committing to it.
 
 ## Example Workflow
 
@@ -245,11 +280,14 @@ sudo rustyuki status
 # Step 2 — dry run: see every command that will execute, without running anything
 sudo rustyuki generate --dry-run
 
-# Step 3 — build and install the UKI
-sudo rustyuki install
+# Step 3 — build and schedule a one-time trial boot
+sudo rustyuki install --boot-once
 
-# Step 4 — use your firmware's one-time boot menu (F12 / F2) to select the UKI entry
-#           DO NOT change your default boot order until you confirm it boots correctly
+# Step 4 — reboot normally and let BootNext test the UKI once
+sudo reboot
+
+# Step 5 — after a successful UKI boot, make it permanent
+sudo rustyuki confirm
 ```
 
 After booting into the UKI, verify it was used:
