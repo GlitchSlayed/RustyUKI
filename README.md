@@ -36,6 +36,7 @@
 - [⚠️ Warnings & Known Failure Modes](#%EF%B8%8F-warnings--known-failure-modes)
 - [Pre-flight Checklist](#pre-flight-checklist)
 - [Project Structure](#project-structure)
+- [Inspiration & Credits](#inspiration--credits)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
 - [License](#license)
@@ -457,29 +458,68 @@ RustyUKI/
 
 ---
 
+## Inspiration & Credits
+
+RustyUKI is its own Rust-native implementation, but the project is heavily informed by existing Fedora and Secure Boot tooling. Credit where it is due:
+
+- **[kraxel/fedora-uki](https://github.com/kraxel/fedora-uki)** — strong reference point for Fedora-oriented UKI workflows, `kernel-install` integration, tentative boot entry handling, and broader production hardening ideas.
+- **[rhboot/nmbl-builder](https://github.com/rhboot/nmbl-builder)** — inspiration for EFI boot entry management, Secure Boot signing flows, rollback-minded installation patterns, and practical builder ergonomics.
+- **[dracut](https://github.com/dracutdevs/dracut)** — RustyUKI relies on `dracut` to generate initramfs images.
+- **[systemd ukify / bootctl](https://github.com/systemd/systemd)** — `ukify` assembles the final UKI and `bootctl` is used for ESP synchronization where appropriate.
+- **[`efibootmgr`](https://github.com/rhboot/efibootmgr)** — used for EFI boot entry creation and inspection.
+
+These projects and tools shaped both the current implementation and the roadmap below.
+
+---
+
 ## Roadmap
 
-### 🔜 Near-term
+> [!NOTE]
+> The roadmap below incorporates ideas derived from comparing RustyUKI against **kraxel/fedora-uki** and **rhboot/nmbl-builder**, alongside features already planned for RustyUKI itself. Items remain grouped roughly by implementation effort and expected impact.
 
-- [ ] **Nobara Linux support** — detect Nobara-specific paths and dracut quirks; full pipeline testing
-- [ ] **Packaged releases** — pre-built binaries via GitHub Releases with SHA256 checksums
-- [ ] **RPM spec file** — `dnf install rustyuki` support for Fedora and Nobara
-- [ ] **`kernel-install` hook** — auto-rebuild UKIs on kernel updates, eliminating manual `rustyuki install` calls
+### 1. Safety & Boot Entry Management
 
-### 🔧 Medium-term
+- [ ] **`--boot-once` / BootNext trial boot** — add a safer first-boot workflow using `efibootmgr --bootnext`, plus a follow-up `rustyuki confirm` command to make a successfully tested UKI permanent.
+- [ ] **Secure Boot cmdline guard** — detect active Secure Boot, warn when cmdline changes require a rebuild/re-sign, and track cmdline hashes beside installed UKIs.
+- [ ] **ESP mount validation** — add preflight checks for mount state, read-write access, free space, and output directory writability before any build starts.
 
-- [ ] **Secure Boot signing** — integrate `sbsign` / `pesign`; document key enrollment workflow
-- [ ] **Multi-kernel management** — track UKIs across kernel versions; auto-cleanup of stale entries
-- [ ] **Fallback UKI pinning** — protect a designated "last known good" UKI from being overwritten
-- [ ] **Automated pre-flight validation** — config checks before every build (ESP, cmdline, disk space, tool availability)
-- [ ] **TUI dashboard** — interactive terminal UI for boot entries, ESP contents, and build history
+### 2. Fedora Integration
 
-### 🔬 Long-term / Experimental
+- [ ] **`kernel-install` plugin** — ship a Fedora-friendly plugin so kernel add/remove events can automatically build or prune UKIs.
+- [ ] **Boot environment awareness in `status`** — surface EFI boot entry details via `kernel-bootcfg --show` when available, with `efibootmgr -v` as a fallback.
+- [ ] **GPT autodiscovery advisory** — detect discoverable root partitions and warn when `root=` is redundant or stale.
+- [ ] **Supported architectures** — keep short-term guards in place for x86_64-only assumptions today, while planning full aarch64 support later.
+- [ ] **Nobara Linux support** — detect Nobara-specific paths and dracut quirks; full pipeline testing.
 
-- [ ] **Broader distro support** — Arch Linux (with dracut), openSUSE Tumbleweed, (Ubuntu & Debian based distros via more backends?)
-- [ ] **TPM2 + measured boot** — integration with `systemd-pcrphase` and PCR-sealed secrets
-- [ ] **UKI signing service** — local signing daemon with audit log
-- [ ] **GUI frontend** — desktop application (GTK or Tauri) for non-CLI users
+### 3. Signing & Secure Boot
+
+- [ ] **Secure Boot signing** — integrate `pesign` / `sbsign` into the build pipeline with optional configuration.
+- [ ] **MOK provisioning helper** — add a guided `rustyuki enroll-mok` flow wrapping `efikeygen`, `certutil`, and `mokutil`.
+- [ ] **TPM2 + measured boot** — integrate with `systemd-pcrphase` and PCR-sealed secret workflows.
+- [ ] **UKI signing service** — explore a local signing daemon with audit logging for higher-assurance setups.
+
+### 4. UKI Output & Build Pipeline
+
+- [ ] **Atomic write with rollback slot** — preserve the previous UKI as a `.prev` image and add a `rustyuki rollback` command for recovery.
+- [ ] **Multi-profile UKI support** — allow multiple named build profiles from one config for default, recovery, cloud, or hardware-specific UKIs.
+- [ ] **Rootfs validation and fix-up** — cross-check `root=` against the running system in `status` and add a `rustyuki fix-cmdline` helper.
+- [ ] **Multi-kernel management** — continue improving kernel-version tracking and cleanup of stale UKIs and entries.
+- [ ] **Fallback UKI pinning** — protect a designated "last known good" UKI from accidental replacement.
+- [ ] **Automated pre-flight validation** — continue expanding built-in safety checks before every build.
+
+### 5. CI, Packaging & Releases
+
+- [ ] **Packaged releases** — publish pre-built binaries via GitHub Releases with SHA256 checksums.
+- [ ] **RPM spec packaging** — complete `dnf install rustyuki` support for Fedora-based systems.
+- [ ] **Workflow consolidation** — merge overlapping RPM workflows into a single `rpm.yml` pipeline with separate CI and release jobs.
+- [ ] **Clippy in CI** — add `cargo clippy --all-targets -- -D warnings` as a required check.
+- [ ] **Pinned Fedora container digests** — pin workflow container images for better reproducibility.
+
+### 6. UX & Longer-term Ideas
+
+- [ ] **Broader distro support** — explore Arch Linux (with dracut), openSUSE Tumbleweed, and potentially Debian/Ubuntu-family systems via additional backends.
+- [ ] **TUI dashboard** — interactive terminal UI for boot entries, ESP contents, and build history.
+- [ ] **GUI frontend** — desktop application (GTK or Tauri) for non-CLI users.
 
 ---
 
