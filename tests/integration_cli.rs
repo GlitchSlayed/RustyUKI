@@ -24,7 +24,7 @@ mod kernel;
 #[path = "../src/ukify.rs"]
 mod ukify;
 
-use app::{resolve_generate_settings, status};
+use app::{confirm, generate, install, resolve_generate_settings, status, GenerateSettings};
 use cli::GenerateArgs;
 use cmd::{CommandRunner, ProcessOutput};
 use config::AppConfig;
@@ -95,6 +95,7 @@ fn default_args() -> GenerateArgs {
         cmdline_file: None,
         splash: None,
         os_release: None,
+        boot_once: false,
     }
 }
 
@@ -108,6 +109,7 @@ fn resolve_settings_cli_override_wins() {
         cmdline_file: Some("/override/cmdline".into()),
         splash: Some("/override/splash.bmp".into()),
         os_release: Some("/override/os-release".into()),
+        boot_once: false,
     };
 
     let resolved = resolve_generate_settings(&cfg, &args, "ignored");
@@ -375,4 +377,373 @@ fn prune_removes_only_unknown_kernel_efis() {
     assert!(keep.exists());
     assert!(!prune.exists());
     assert!(other.exists());
+}
+
+#[test]
+fn generate_with_boot_once_sets_bootnext_immediately() {
+    let temp = TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+    let esp = temp.path().join("esp");
+    let out = esp.join("EFI/Linux");
+    let cmdline = temp.path().join("cmdline");
+    let os_release = temp.path().join("os-release");
+    std::fs::create_dir_all(&out).unwrap_or_else(|e| panic!("{e}"));
+    std::fs::write(&cmdline, "root=UUID=test rw quiet").unwrap_or_else(|e| panic!("{e}"));
+    std::fs::write(
+        &os_release,
+        "NAME=TestOS
+",
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+
+    let kernel_dir = PathBuf::from("/lib/modules/6.11.5-test");
+    std::fs::create_dir_all(&kernel_dir).unwrap_or_else(|e| panic!("{e}"));
+    std::fs::write(kernel_dir.join("vmlinuz"), b"kernel").unwrap_or_else(|e| panic!("{e}"));
+
+    let expected_temp_out = out.join(".linux-6.11.5-test.efi.tmp");
+    let final_out = out.join("linux-6.11.5-test.efi");
+
+    let runner = MockRunner::new(vec![
+        ExpectedCall {
+            program: "dracut".to_string(),
+            args: vec![
+                "-f".to_string(),
+                "/tmp/initramfs-6.11.5-test.img".to_string(),
+                "6.11.5-test".to_string(),
+            ],
+            output: Ok(ProcessOutput::default()),
+        },
+        ExpectedCall {
+            program: "ukify".to_string(),
+            args: vec![
+                "build".to_string(),
+                "--linux".to_string(),
+                kernel_dir.join("vmlinuz").display().to_string(),
+                "--initrd".to_string(),
+                "/tmp/initramfs-6.11.5-test.img".to_string(),
+                "--cmdline".to_string(),
+                "root=/dev/test rw quiet".to_string(),
+                "--os-release".to_string(),
+                os_release.display().to_string(),
+                "--output".to_string(),
+                expected_temp_out.display().to_string(),
+            ],
+            output: Ok(ProcessOutput::default()),
+        },
+        ExpectedCall {
+            program: "findmnt".to_string(),
+            args: vec![
+                "-n".to_string(),
+                "-o".to_string(),
+                "SOURCE".to_string(),
+                esp.display().to_string(),
+            ],
+            output: Ok(ProcessOutput {
+                stdout: "/dev/nvme0n1p1
+"
+                .to_string(),
+                stderr: String::new(),
+            }),
+        },
+        ExpectedCall {
+            program: "lsblk".to_string(),
+            args: vec![
+                "-no".to_string(),
+                "PKNAME".to_string(),
+                "/dev/nvme0n1p1".to_string(),
+            ],
+            output: Ok(ProcessOutput {
+                stdout: "nvme0n1
+"
+                .to_string(),
+                stderr: String::new(),
+            }),
+        },
+        ExpectedCall {
+            program: "lsblk".to_string(),
+            args: vec![
+                "-no".to_string(),
+                "PARTNUM".to_string(),
+                "/dev/nvme0n1p1".to_string(),
+            ],
+            output: Ok(ProcessOutput {
+                stdout: "1
+"
+                .to_string(),
+                stderr: String::new(),
+            }),
+        },
+        ExpectedCall {
+            program: "efibootmgr".to_string(),
+            args: vec!["--verbose".to_string()],
+            output: Ok(ProcessOutput {
+                stdout: "BootCurrent: 0001
+BootOrder: 0001
+Boot0001* Fedora	HD(...)
+"
+                .to_string(),
+                stderr: String::new(),
+            }),
+        },
+        ExpectedCall {
+            program: "efibootmgr".to_string(),
+            args: vec![
+                "--quiet".to_string(),
+                "--create".to_string(),
+                "--disk".to_string(),
+                "/dev/nvme0n1".to_string(),
+                "--part".to_string(),
+                "1".to_string(),
+                "--label".to_string(),
+                "Linux UKI 6.11.5-test".to_string(),
+                "--loader".to_string(),
+                r"\EFI\Linux\linux-6.11.5-test.efi".to_string(),
+            ],
+            output: Ok(ProcessOutput::default()),
+        },
+        ExpectedCall {
+            program: "efibootmgr".to_string(),
+            args: vec!["--verbose".to_string()],
+            output: Ok(ProcessOutput {
+                stdout: "BootCurrent: 0001
+BootOrder: 0001,0008
+Boot0001* Fedora	HD(...)
+Boot0008* Linux UKI 6.11.5-test	HD(...)
+"
+                .to_string(),
+                stderr: String::new(),
+            }),
+        },
+        ExpectedCall {
+            program: "efibootmgr".to_string(),
+            args: vec!["--bootnext".to_string(), "0008".to_string()],
+            output: Ok(ProcessOutput::default()),
+        },
+    ]);
+
+    let mut cfg = AppConfig::default();
+    cfg.uki.auto_detect_cmdline = false;
+    cfg.uki.configured_cmdline = "root=/dev/test rw quiet".to_string();
+    let settings = GenerateSettings {
+        kernel_version: "6.11.5-test".to_string(),
+        esp_path: esp.clone(),
+        output_dir: out.clone(),
+        cmdline_file: cmdline,
+        splash: None,
+        os_release,
+    };
+
+    let (built, boot_num) =
+        generate(&runner, &cfg, &settings, true).unwrap_or_else(|e| panic!("{e:#}"));
+    assert_eq!(built, final_out);
+    assert_eq!(boot_num, "0008");
+    runner.assert_no_pending();
+
+    std::fs::remove_file(kernel_dir.join("vmlinuz")).ok();
+    std::fs::remove_dir(kernel_dir).ok();
+}
+
+#[test]
+fn install_with_boot_once_sets_bootnext_after_bootctl_update() {
+    let temp = TempDir::new().unwrap_or_else(|e| panic!("{e}"));
+    let esp = temp.path().join("esp");
+    let out = esp.join("EFI/Linux");
+    let cmdline = temp.path().join("cmdline");
+    let os_release = temp.path().join("os-release");
+    std::fs::create_dir_all(&out).unwrap_or_else(|e| panic!("{e}"));
+    std::fs::write(&cmdline, "root=UUID=test rw quiet").unwrap_or_else(|e| panic!("{e}"));
+    std::fs::write(
+        &os_release,
+        "NAME=TestOS
+",
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+
+    let kernel_dir = PathBuf::from("/lib/modules/6.11.4-test");
+    std::fs::create_dir_all(&kernel_dir).unwrap_or_else(|e| panic!("{e}"));
+    std::fs::write(kernel_dir.join("vmlinuz"), b"kernel").unwrap_or_else(|e| panic!("{e}"));
+
+    let expected_temp_out = out.join(".linux-6.11.4-test.efi.tmp");
+    let final_out = out.join("linux-6.11.4-test.efi");
+
+    let runner = MockRunner::new(vec![
+        ExpectedCall {
+            program: "dracut".to_string(),
+            args: vec![
+                "-f".to_string(),
+                "/tmp/initramfs-6.11.4-test.img".to_string(),
+                "6.11.4-test".to_string(),
+            ],
+            output: Ok(ProcessOutput::default()),
+        },
+        ExpectedCall {
+            program: "ukify".to_string(),
+            args: vec![
+                "build".to_string(),
+                "--linux".to_string(),
+                kernel_dir.join("vmlinuz").display().to_string(),
+                "--initrd".to_string(),
+                "/tmp/initramfs-6.11.4-test.img".to_string(),
+                "--cmdline".to_string(),
+                "root=/dev/test rw quiet".to_string(),
+                "--os-release".to_string(),
+                os_release.display().to_string(),
+                "--output".to_string(),
+                expected_temp_out.display().to_string(),
+            ],
+            output: Ok(ProcessOutput::default()),
+        },
+        ExpectedCall {
+            program: "findmnt".to_string(),
+            args: vec![
+                "-n".to_string(),
+                "-o".to_string(),
+                "SOURCE".to_string(),
+                esp.display().to_string(),
+            ],
+            output: Ok(ProcessOutput {
+                stdout: "/dev/nvme0n1p1
+"
+                .to_string(),
+                stderr: String::new(),
+            }),
+        },
+        ExpectedCall {
+            program: "lsblk".to_string(),
+            args: vec![
+                "-no".to_string(),
+                "PKNAME".to_string(),
+                "/dev/nvme0n1p1".to_string(),
+            ],
+            output: Ok(ProcessOutput {
+                stdout: "nvme0n1
+"
+                .to_string(),
+                stderr: String::new(),
+            }),
+        },
+        ExpectedCall {
+            program: "lsblk".to_string(),
+            args: vec![
+                "-no".to_string(),
+                "PARTNUM".to_string(),
+                "/dev/nvme0n1p1".to_string(),
+            ],
+            output: Ok(ProcessOutput {
+                stdout: "1
+"
+                .to_string(),
+                stderr: String::new(),
+            }),
+        },
+        ExpectedCall {
+            program: "efibootmgr".to_string(),
+            args: vec!["--verbose".to_string()],
+            output: Ok(ProcessOutput {
+                stdout: "BootCurrent: 0001
+BootOrder: 0001
+Boot0001* Fedora	HD(...)
+"
+                .to_string(),
+                stderr: String::new(),
+            }),
+        },
+        ExpectedCall {
+            program: "efibootmgr".to_string(),
+            args: vec![
+                "--quiet".to_string(),
+                "--create".to_string(),
+                "--disk".to_string(),
+                "/dev/nvme0n1".to_string(),
+                "--part".to_string(),
+                "1".to_string(),
+                "--label".to_string(),
+                "Linux UKI 6.11.4-test".to_string(),
+                "--loader".to_string(),
+                r"\EFI\Linux\linux-6.11.4-test.efi".to_string(),
+            ],
+            output: Ok(ProcessOutput::default()),
+        },
+        ExpectedCall {
+            program: "efibootmgr".to_string(),
+            args: vec!["--verbose".to_string()],
+            output: Ok(ProcessOutput {
+                stdout: "BootCurrent: 0001
+BootOrder: 0001,0007
+Boot0001* Fedora	HD(...)
+Boot0007* Linux UKI 6.11.4-test	HD(...)
+"
+                .to_string(),
+                stderr: String::new(),
+            }),
+        },
+        ExpectedCall {
+            program: "efibootmgr".to_string(),
+            args: vec!["--bootnext".to_string(), "0007".to_string()],
+            output: Ok(ProcessOutput::default()),
+        },
+        ExpectedCall {
+            program: "rpm".to_string(),
+            args: vec!["-q".to_string(), "kernel".to_string()],
+            output: Ok(ProcessOutput {
+                stdout: "kernel-6.11.4-test
+"
+                .to_string(),
+                stderr: String::new(),
+            }),
+        },
+        ExpectedCall {
+            program: "bootctl".to_string(),
+            args: vec!["update".to_string()],
+            output: Ok(ProcessOutput::default()),
+        },
+    ]);
+
+    let mut cfg = AppConfig::default();
+    cfg.uki.auto_detect_cmdline = false;
+    cfg.uki.configured_cmdline = "root=/dev/test rw quiet".to_string();
+    let settings = GenerateSettings {
+        kernel_version: "6.11.4-test".to_string(),
+        esp_path: esp.clone(),
+        output_dir: out.clone(),
+        cmdline_file: cmdline,
+        splash: None,
+        os_release,
+    };
+
+    let installed = install(&runner, &cfg, &settings, true).unwrap_or_else(|e| panic!("{e:#}"));
+    assert_eq!(installed, final_out);
+    runner.assert_no_pending();
+
+    std::fs::remove_file(kernel_dir.join("vmlinuz")).ok();
+    std::fs::remove_dir(kernel_dir).ok();
+}
+
+#[test]
+fn confirm_promotes_current_boot_entry_to_front() {
+    let runner = MockRunner::new(vec![
+        ExpectedCall {
+            program: "efibootmgr".to_string(),
+            args: vec!["--verbose".to_string()],
+            output: Ok(ProcessOutput {
+                stdout: "BootCurrent: 0007
+BootNext: 0007
+BootOrder: 0001,0007,0003
+Boot0001* Fedora	HD(...)
+Boot0003* Rescue	HD(...)
+Boot0007* Linux UKI 6.11.4-test	HD(...)
+"
+                .to_string(),
+                stderr: String::new(),
+            }),
+        },
+        ExpectedCall {
+            program: "efibootmgr".to_string(),
+            args: vec!["--bootorder".to_string(), "0007,0001,0003".to_string()],
+            output: Ok(ProcessOutput::default()),
+        },
+    ]);
+
+    let boot_num = confirm(&runner).unwrap_or_else(|e| panic!("{e:#}"));
+    assert_eq!(boot_num, "0007");
+    runner.assert_no_pending();
 }

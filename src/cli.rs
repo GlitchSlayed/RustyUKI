@@ -1,4 +1,4 @@
-use clap::{ArgAction, Parser, Subcommand};
+use clap::{ArgAction, Args, Parser, Subcommand};
 use std::path::PathBuf;
 
 /// RustyUKI command-line interface.
@@ -34,10 +34,12 @@ pub enum Commands {
     InstallHook(InstallHookArgs),
     /// Show current operational status and resolved settings.
     Status,
+    /// Make the currently booted trial UKI the permanent default boot entry.
+    Confirm,
 }
 
 /// Shared override arguments for generation actions.
-#[derive(Debug, Clone, Parser)]
+#[derive(Debug, Clone, Args)]
 pub struct GenerateArgs {
     /// Kernel version override.
     #[arg(long)]
@@ -57,6 +59,9 @@ pub struct GenerateArgs {
     /// Optional os-release path override.
     #[arg(long)]
     pub os_release: Option<PathBuf>,
+    /// Set the new EFI entry as the one-time next boot target instead of immediately changing permanent boot order.
+    #[arg(long)]
+    pub boot_once: bool,
 }
 
 /// Options for installing the kernel-install hook.

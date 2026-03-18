@@ -2,7 +2,9 @@ use crate::cli::GenerateArgs;
 use crate::cmd::CommandRunner;
 use crate::config::AppConfig;
 use crate::dracut::build_initramfs;
-use crate::efi::{register_boot_entry, validate_esp_mount};
+use crate::efi::{
+    promote_current_boot_entry, register_boot_entry, schedule_one_time_boot, validate_esp_mount,
+};
 use crate::kernel::{
     list_installed_kernels, prune_stale_uki_artifacts, resolve_cmdline, CmdlineSettings,
 };
@@ -75,7 +77,8 @@ pub fn generate(
     runner: &dyn CommandRunner,
     cfg: &AppConfig,
     settings: &GenerateSettings,
-) -> Result<PathBuf> {
+    boot_once: bool,
+) -> Result<(PathBuf, String)> {
     validate_esp_mount(&settings.esp_path)?;
     ensure_required_paths(settings)?;
 
@@ -124,10 +127,19 @@ pub fn generate(
     let built_uki = build_uki(runner, &params)?;
 
     let label = format!("Linux UKI {}", settings.kernel_version);
-    register_boot_entry(runner, &settings.esp_path, &built_uki, &label)?;
+    let boot_num = register_boot_entry(runner, &settings.esp_path, &built_uki, &label)?;
 
-    info!("UKI generation finished: {}", built_uki.display());
-    Ok(built_uki)
+    if boot_once {
+        schedule_one_time_boot(runner, &boot_num)?;
+        info!("Scheduled BootNext for Boot{boot_num}; run `rustyuki confirm` after a successful trial boot to make it permanent");
+    }
+
+    info!(
+        "UKI generation finished: {} (Boot{})",
+        built_uki.display(),
+        boot_num
+    );
+    Ok((built_uki, boot_num))
 }
 
 /// Performs install flow: generate UKI, then execute bootloader maintenance.
@@ -135,8 +147,9 @@ pub fn install(
     runner: &dyn CommandRunner,
     cfg: &AppConfig,
     settings: &GenerateSettings,
+    boot_once: bool,
 ) -> Result<PathBuf> {
-    let path = generate(runner, cfg, settings)?;
+    let (path, _boot_num) = generate(runner, cfg, settings, boot_once)?;
 
     let installed = list_installed_kernels(runner)?;
     let removed = prune_stale_uki_artifacts(&settings.output_dir, &installed)?;
@@ -148,6 +161,7 @@ pub fn install(
     runner
         .run("bootctl", &["update"])
         .context("bootctl update failed")?;
+
     Ok(path)
 }
 
@@ -161,7 +175,7 @@ pub fn reconcile(
     for kernel in &kernels {
         let mut settings = base.clone();
         settings.kernel_version = kernel.clone();
-        let _ = generate(runner, cfg, &settings)?;
+        let _ = generate(runner, cfg, &settings, false)?;
     }
 
     let removed = prune_stale_uki_artifacts(&base.output_dir, &kernels)?;
@@ -174,6 +188,13 @@ pub fn reconcile(
         .context("bootctl update failed")?;
 
     Ok(())
+}
+
+/// Promotes the currently booted EFI entry to the front of BootOrder.
+pub fn confirm(runner: &dyn CommandRunner) -> Result<String> {
+    let boot_num = promote_current_boot_entry(runner)?;
+    info!("Confirmed Boot{boot_num} as the permanent default boot entry");
+    Ok(boot_num)
 }
 
 /// Reports current status and resolved paths.
@@ -229,6 +250,7 @@ mod tests {
             cmdline_file: None,
             splash: None,
             os_release: None,
+            boot_once: false,
         };
 
         let resolved = resolve_generate_settings(&cfg, &args, "6.9.0-test");
