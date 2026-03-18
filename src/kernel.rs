@@ -55,7 +55,7 @@ pub fn resolve_cmdline(runner: &dyn CommandRunner, settings: &CmdlineSettings) -
     let current_major = major_version(&version_id);
 
     if settings.auto_detect {
-        if let Some(cached) = load_cached_cmdline(settings, &version_id, &current_major)? {
+        if let Some(cached) = load_cached_cmdline(settings, &version_id, current_major)? {
             return validate_final_cmdline(
                 runner,
                 &cached.value,

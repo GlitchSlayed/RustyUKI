@@ -102,6 +102,7 @@ sudo cp target/release/rustyuki /usr/local/bin/
 
 ```bash
 rustyuki --version
+# rustyuki 0.2.0
 ```
 
 > [!NOTE]
@@ -513,17 +514,22 @@ These projects and tools shaped both the current implementation and the roadmap 
 ## Roadmap
 
 > [!NOTE]
-> The roadmap below incorporates ideas derived from comparing RustyUKI against **kraxel/fedora-uki** and **rhboot/nmbl-builder**, alongside features already planned for RustyUKI itself. Items remain grouped roughly by implementation effort and expected impact.
+> The roadmap below incorporates ideas derived from comparing RustyUKI against **kraxel/fedora-uki** and **rhboot/nmbl-builder**, alongside features already planned for RustyUKI itself. Shipped items were moved out so this section only tracks work that is still open.
+
+### Recently shipped
+
+- **BootNext trial boot workflow** — `--boot-once` now schedules a one-time trial boot and `rustyuki confirm` promotes the successful entry afterward.
+- **ESP preflight validation** — generation now checks mount presence, mount state, free space, and output directory writability before writing a UKI.
+- **Fedora `kernel-install` hook support** — RustyUKI can install a plugin so kernel add/remove events trigger reconciliation automatically.
+- **Multi-kernel reconciliation and stale artifact cleanup** — `rustyuki reconcile` rebuilds installed kernels and prunes stale `linux-*.efi` outputs.
+- **RPM workflow consolidation** — Fedora RPM CI and scheduled release automation now live in the single `rpm.yml` workflow.
 
 ### 1. Safety & Boot Entry Management
 
-- [ ] **`--boot-once` / BootNext trial boot** — add a safer first-boot workflow using `efibootmgr --bootnext`, plus a follow-up `rustyuki confirm` command to make a successfully tested UKI permanent.
 - [ ] **Secure Boot cmdline guard** — detect active Secure Boot, warn when cmdline changes require a rebuild/re-sign, and track cmdline hashes beside installed UKIs.
-- [ ] **ESP mount validation** — add preflight checks for mount state, read-write access, free space, and output directory writability before any build starts.
 
 ### 2. Fedora Integration
 
-- [ ] **`kernel-install` plugin** — ship a Fedora-friendly plugin so kernel add/remove events can automatically build or prune UKIs.
 - [ ] **Boot environment awareness in `status`** — surface EFI boot entry details via `kernel-bootcfg --show` when available, with `efibootmgr -v` as a fallback.
 - [ ] **GPT autodiscovery advisory** — detect discoverable root partitions and warn when `root=` is redundant or stale.
 - [ ] **Supported architectures** — keep short-term guards in place for x86_64-only assumptions today, while planning full aarch64 support later.
@@ -541,7 +547,6 @@ These projects and tools shaped both the current implementation and the roadmap 
 - [ ] **Atomic write with rollback slot** — preserve the previous UKI as a `.prev` image and add a `rustyuki rollback` command for recovery.
 - [ ] **Multi-profile UKI support** — allow multiple named build profiles from one config for default, recovery, cloud, or hardware-specific UKIs.
 - [ ] **Rootfs validation and fix-up** — cross-check `root=` against the running system in `status` and add a `rustyuki fix-cmdline` helper.
-- [ ] **Multi-kernel management** — continue improving kernel-version tracking and cleanup of stale UKIs and entries.
 - [ ] **Fallback UKI pinning** — protect a designated "last known good" UKI from accidental replacement.
 - [ ] **Automated pre-flight validation** — continue expanding built-in safety checks before every build.
 
@@ -549,7 +554,6 @@ These projects and tools shaped both the current implementation and the roadmap 
 
 - [ ] **Packaged releases** — publish pre-built binaries via GitHub Releases with SHA256 checksums.
 - [ ] **RPM spec packaging** — complete `dnf install rustyuki` support for Fedora-based systems.
-- [ ] **Workflow consolidation** — merge overlapping RPM workflows into a single `rpm.yml` pipeline with separate CI and release jobs.
 - [ ] **Clippy in CI** — add `cargo clippy --all-targets -- -D warnings` as a required check.
 - [ ] **Pinned Fedora container digests** — pin workflow container images for better reproducibility.
 

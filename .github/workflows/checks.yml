@@ -45,6 +45,9 @@ jobs:
             cargo test --all-targets
           fi
 
+      - name: Rust Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
       - name: Rust compile check
         run: |
           if [[ -f Cargo.lock ]]; then

@@ -341,7 +341,7 @@ fn statvfs_free_bytes(path: &Path) -> Result<u64> {
     }
 
     let stats = unsafe { stats.assume_init() };
-    Ok((stats.f_bavail as u64).saturating_mul(stats.f_frsize as u64))
+    Ok(stats.f_bavail.saturating_mul(stats.f_frsize))
 }
 
 fn ensure_path_writable(path: &Path) -> Result<()> {

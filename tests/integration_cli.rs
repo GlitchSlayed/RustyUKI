@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 use anyhow::{anyhow, Result};
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -15,22 +14,31 @@ fn test_esp_mountpoint() -> PathBuf {
     panic!("no writable mount point available for ESP integration tests");
 }
 
+#[allow(dead_code)]
 #[path = "../src/app.rs"]
 mod app;
+#[allow(dead_code)]
 #[path = "../src/cli.rs"]
 mod cli;
+#[allow(dead_code)]
 #[path = "../src/cmd.rs"]
 mod cmd;
+#[allow(dead_code)]
 #[path = "../src/config.rs"]
 mod config;
+#[allow(dead_code)]
 #[path = "../src/dracut.rs"]
 mod dracut;
+#[allow(dead_code)]
 #[path = "../src/efi.rs"]
 mod efi;
+#[allow(dead_code)]
 #[path = "../src/error.rs"]
 mod error;
+#[allow(dead_code)]
 #[path = "../src/kernel.rs"]
 mod kernel;
+#[allow(dead_code)]
 #[path = "../src/ukify.rs"]
 mod ukify;
 
