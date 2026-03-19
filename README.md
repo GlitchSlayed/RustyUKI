@@ -105,6 +105,13 @@ rustyuki --version
 # rustyuki 0.2.0
 ```
 
+### Activate automatic UKI rebuilds on kernel updates
+```bash
+sudo rustyuki install-hook
+```
+
+This installs a `kernel-install` plugin at `/usr/lib/kernel/install.d/90-rustyuki.install`. After this, every `dnf update kernel` or kernel package transaction will automatically rebuild or prune your UKIs without any manual intervention.
+
 > [!NOTE]
 > Pre-built binaries and RPM packages are planned for a future release. See [Roadmap](#roadmap).
 
@@ -520,7 +527,7 @@ These projects and tools shaped both the current implementation and the roadmap 
 
 - **BootNext trial boot workflow** — `--boot-once` now schedules a one-time trial boot and `rustyuki confirm` promotes the successful entry afterward.
 - **ESP preflight validation** — generation now checks mount presence, mount state, free space, and output directory writability before writing a UKI.
-- **Fedora `kernel-install` hook support** — RustyUKI can install a plugin so kernel add/remove events trigger reconciliation automatically.
+- **Fedora `kernel-install` hook support** — RustyUKI can install a plugin so kernel add/remove events now trigger targeted UKI generation on adds and reconciliation on removals automatically.
 - **Multi-kernel reconciliation and stale artifact cleanup** — `rustyuki reconcile` rebuilds installed kernels and prunes stale `linux-*.efi` outputs.
 - **RPM workflow consolidation** — Fedora RPM CI and scheduled release automation now live in the single `rpm.yml` workflow.
 

@@ -37,7 +37,7 @@ pub fn render_kernel_install_plugin(binary: &Path, config: &Path) -> Result<Stri
 
     Ok(format!(
         r#"#!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
 COMMAND="${{1:-}}"
 KERNEL_VER="${{2:-unknown}}"
@@ -50,22 +50,28 @@ log() {{
 
 if [[ ! -x "$RUSTYUKI_BIN" ]]; then
   log "RustyUKI binary not executable: $RUSTYUKI_BIN"
-  exit 1
+  exit 0
 fi
 
 case "$COMMAND" in
   add)
-    log "kernel add: $KERNEL_VER; reconciling all installed kernels"
+    log "kernel add: $KERNEL_VER — building UKI for this kernel only"
+    if ! "$RUSTYUKI_BIN" --config "$RUSTYUKI_CONFIG" generate --kernel-version "$KERNEL_VER"; then
+      log "warning: generate failed for kernel $KERNEL_VER; leaving transaction successful"
+    fi
     ;;
   remove)
-    log "kernel remove: $KERNEL_VER; reconciling all installed kernels"
+    log "kernel remove: $KERNEL_VER — reconciling all installed kernels"
+    if ! "$RUSTYUKI_BIN" --config "$RUSTYUKI_CONFIG" reconcile; then
+      log "warning: reconcile failed after removing kernel $KERNEL_VER; leaving transaction successful"
+    fi
     ;;
   *)
-    log "kernel command '$COMMAND'; running reconcile"
+    log "unknown command '$COMMAND' — skipping"
     ;;
 esac
 
-exec "$RUSTYUKI_BIN" --config "$RUSTYUKI_CONFIG" reconcile
+exit 0
 "#
     ))
 }
@@ -86,5 +92,57 @@ mod tests {
         assert!(script.contains("reconcile"));
         assert!(script.contains("--config \"$RUSTYUKI_CONFIG\""));
         assert!(script.contains("KERNEL_VER"));
+    }
+
+    #[test]
+    fn plugin_uses_generate_for_add() {
+        let script = render_kernel_install_plugin(
+            Path::new("/usr/local/bin/rustyuki"),
+            Path::new("/etc/uki/uki.conf"),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        assert!(script.contains("add)"));
+        assert!(script.contains("generate --kernel-version \"$KERNEL_VER\""));
+    }
+
+    #[test]
+    fn plugin_uses_reconcile_for_remove() {
+        let script = render_kernel_install_plugin(
+            Path::new("/usr/local/bin/rustyuki"),
+            Path::new("/etc/uki/uki.conf"),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        let remove_section = script
+            .split("remove)")
+            .nth(1)
+            .and_then(|section| section.split("*)").next())
+            .unwrap_or("");
+        assert!(remove_section.contains("reconcile"));
+    }
+
+    #[test]
+    fn plugin_exits_zero_on_binary_missing() {
+        let script = render_kernel_install_plugin(
+            Path::new("/usr/local/bin/rustyuki"),
+            Path::new("/etc/uki/uki.conf"),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        assert!(script.contains("RustyUKI binary not executable: $RUSTYUKI_BIN"));
+        assert!(script.contains("exit 0"));
+        assert!(!script.contains("exit 1"));
+    }
+
+    #[test]
+    fn plugin_does_not_use_exec() {
+        let script = render_kernel_install_plugin(
+            Path::new("/usr/local/bin/rustyuki"),
+            Path::new("/etc/uki/uki.conf"),
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+
+        assert!(!script.contains("exec "));
     }
 }
