@@ -5,6 +5,7 @@ use crate::dracut::build_initramfs;
 use crate::efi::{
     promote_current_boot_entry, register_boot_entry, schedule_one_time_boot, validate_esp_preflight,
 };
+use crate::hook::install_boot_confirm_service;
 use crate::kernel::{
     list_installed_kernels, prune_stale_uki_artifacts, resolve_cmdline, CmdlineSettings,
 };
@@ -140,11 +141,23 @@ pub fn install(
     runner: &dyn CommandRunner,
     cfg: &AppConfig,
     settings: &GenerateSettings,
-    boot_once: bool,
 ) -> Result<PathBuf> {
     validate_esp_preflight(&settings.esp_path, &settings.output_dir)?;
 
-    let (path, _boot_num) = generate(runner, cfg, settings, boot_once)?;
+    let current_exe =
+        std::env::current_exe().context("failed resolving current executable path")?;
+    install_boot_confirm_service(
+        Path::new("/etc/systemd/system/rustyuki-boot-confirm.service"),
+        &current_exe,
+    )?;
+    runner
+        .run("systemctl", &["daemon-reload"])
+        .context("failed to reload systemd units after installing rustyuki-boot-confirm.service")?;
+    runner
+        .run("systemctl", &["enable", "rustyuki-boot-confirm.service"])
+        .context("failed enabling rustyuki-boot-confirm.service")?;
+
+    let (path, _boot_num) = generate(runner, cfg, settings, true)?;
 
     let installed = list_installed_kernels(runner)?;
     let removed = prune_stale_uki_artifacts(&settings.output_dir, &installed)?;

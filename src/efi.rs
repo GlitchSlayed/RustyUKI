@@ -149,6 +149,7 @@ pub fn register_boot_entry(
         &[
             "--quiet",
             "--create",
+            "--create-only",
             "--disk",
             &format!("/dev/{disk}"),
             "--part",
@@ -202,6 +203,9 @@ pub fn promote_current_boot_entry(runner: &dyn CommandRunner) -> Result<String> 
     runner
         .run("efibootmgr", &["--bootorder", &boot_order_arg])
         .with_context(|| format!("failed setting BootOrder to {boot_order_arg}"))?;
+    runner
+        .run("efibootmgr", &["--delete-bootnext"])
+        .context("failed clearing BootNext after confirmation")?;
     Ok(current)
 }
 

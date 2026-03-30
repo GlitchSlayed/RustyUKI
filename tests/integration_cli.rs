@@ -36,6 +36,9 @@ mod efi;
 #[path = "../src/error.rs"]
 mod error;
 #[allow(dead_code)]
+#[path = "../src/hook.rs"]
+mod hook;
+#[allow(dead_code)]
 #[path = "../src/kernel.rs"]
 mod kernel;
 #[allow(dead_code)]
@@ -507,6 +510,7 @@ Boot0001* Fedora	HD(...)
             args: vec![
                 "--quiet".to_string(),
                 "--create".to_string(),
+                "--create-only".to_string(),
                 "--disk".to_string(),
                 "/dev/nvme0n1".to_string(),
                 "--part".to_string(),
@@ -562,7 +566,7 @@ Boot0008* Linux UKI 6.11.5-test	HD(...)
 }
 
 #[test]
-fn install_with_boot_once_sets_bootnext_after_bootctl_update() {
+fn install_sets_bootnext_after_bootctl_update() {
     let temp = TempDir::new().unwrap_or_else(|e| panic!("{e}"));
     let esp = test_esp_mountpoint();
     let out = esp.join("EFI/Linux");
@@ -585,6 +589,19 @@ fn install_with_boot_once_sets_bootnext_after_bootctl_update() {
     let final_out = out.join("linux-6.11.4-test.efi");
 
     let runner = MockRunner::new(vec![
+        ExpectedCall {
+            program: "systemctl".to_string(),
+            args: vec!["daemon-reload".to_string()],
+            output: Ok(ProcessOutput::default()),
+        },
+        ExpectedCall {
+            program: "systemctl".to_string(),
+            args: vec![
+                "enable".to_string(),
+                "rustyuki-boot-confirm.service".to_string(),
+            ],
+            output: Ok(ProcessOutput::default()),
+        },
         ExpectedCall {
             program: "dracut".to_string(),
             args: vec![
@@ -671,6 +688,7 @@ Boot0001* Fedora	HD(...)
             args: vec![
                 "--quiet".to_string(),
                 "--create".to_string(),
+                "--create-only".to_string(),
                 "--disk".to_string(),
                 "/dev/nvme0n1".to_string(),
                 "--part".to_string(),
@@ -729,7 +747,7 @@ Boot0007* Linux UKI 6.11.4-test	HD(...)
         os_release,
     };
 
-    let installed = install(&runner, &cfg, &settings, true).unwrap_or_else(|e| panic!("{e:#}"));
+    let installed = install(&runner, &cfg, &settings).unwrap_or_else(|e| panic!("{e:#}"));
     assert_eq!(installed, final_out);
     runner.assert_no_pending();
 
@@ -759,6 +777,11 @@ Boot0007* Linux UKI 6.11.4-test	HD(...)
         ExpectedCall {
             program: "efibootmgr".to_string(),
             args: vec!["--bootorder".to_string(), "0007,0001,0003".to_string()],
+            output: Ok(ProcessOutput::default()),
+        },
+        ExpectedCall {
+            program: "efibootmgr".to_string(),
+            args: vec!["--delete-bootnext".to_string()],
             output: Ok(ProcessOutput::default()),
         },
     ]);
