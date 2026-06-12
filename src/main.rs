@@ -60,7 +60,7 @@ fn run() -> Result<()> {
         Commands::Install(args) => {
             let uname = current_kernel(&runner)?;
             let settings = resolve_generate_settings(&cfg, args, &uname);
-            let _ = install(&runner, &cfg, &settings, args.boot_once)?;
+            let _ = install(&runner, &cfg, &settings)?;
         }
         Commands::Reconcile => {
             let uname = current_kernel(&runner)?;

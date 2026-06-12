@@ -220,18 +220,19 @@ Use `--boot-once` when you want firmware to trial the new UKI exactly once via `
 
 #### `install` — Generate and sync the ESP
 
-Identical to `generate`, followed by `bootctl update` to synchronise the ESP.
+`install` now always uses a trial-boot flow:
+
+1. Generates and registers the UKI entry without rewriting permanent `BootOrder`
+2. Sets the new entry as `BootNext` (one-time next boot)
+3. Installs/enables `rustyuki-boot-confirm.service`
+4. Runs `bootctl update` to synchronise the ESP
 
 ```bash
 sudo rustyuki install
 sudo rustyuki install --kernel-version "6.12.0-200.fc41.x86_64"
 ```
 
-Add `--boot-once` to schedule the new EFI entry as the next boot only via `efibootmgr --bootnext`, leaving your permanent `BootOrder` unchanged until you confirm the trial boot succeeded. The same flag is available on `generate` if you only want to register the UKI entry without running `bootctl update`.
-
-```bash
-sudo rustyuki install --boot-once
-```
+Use `generate --boot-once` if you want one-time trial semantics without running `bootctl update`.
 
 #### `reconcile` — Rebuild all installed kernel UKIs and prune stale artifacts
 
@@ -243,7 +244,7 @@ sudo rustyuki reconcile
 
 #### `confirm` — Make a successful trial boot permanent
 
-After booting the one-time UKI successfully, run `confirm` from that booted system. RustyUKI reads `BootCurrent` and moves that entry to the front of `BootOrder`, making the tested UKI your permanent default.
+After booting the one-time UKI successfully, `rustyuki-boot-confirm.service` runs automatically early in userspace and calls `rustyuki confirm`. `confirm` reads `BootCurrent`, moves that entry to the front of `BootOrder`, and clears `BootNext`.
 
 ```bash
 sudo rustyuki confirm
@@ -265,12 +266,12 @@ For first-time GRUB replacement or any risky UKI change, prefer a one-time boot 
 
 ```bash
 # Build the UKI, refresh the ESP, and schedule it for the next boot only
-sudo rustyuki install --boot-once
+sudo rustyuki install
 
 # Reboot normally; firmware will use BootNext exactly once
 sudo reboot
 
-# If the system came back successfully from the UKI, make it permanent
+# Optional manual confirmation (normally done automatically by systemd service)
 sudo rustyuki confirm
 ```
 
@@ -289,12 +290,12 @@ sudo rustyuki status
 sudo rustyuki generate --dry-run
 
 # Step 3 — build and schedule a one-time trial boot
-sudo rustyuki install --boot-once
+sudo rustyuki install
 
 # Step 4 — reboot normally and let BootNext test the UKI once
 sudo reboot
 
-# Step 5 — after a successful UKI boot, make it permanent
+# Step 5 — optional manual confirmation (auto-confirm service handles this on success)
 sudo rustyuki confirm
 ```
 

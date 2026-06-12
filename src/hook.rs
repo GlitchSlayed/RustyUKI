@@ -76,9 +76,55 @@ exit 0
     ))
 }
 
+pub fn install_boot_confirm_service(unit_path: &Path, binary: &Path) -> Result<()> {
+    let parent = unit_path.parent().with_context(|| {
+        format!(
+            "systemd unit path has no parent directory: {}",
+            unit_path.display()
+        )
+    })?;
+    fs::create_dir_all(parent)
+        .with_context(|| format!("failed creating unit directory {}", parent.display()))?;
+
+    let unit = render_boot_confirm_service(binary)?;
+    fs::write(unit_path, unit)
+        .with_context(|| format!("failed writing unit {}", unit_path.display()))?;
+
+    let mut perms = fs::metadata(unit_path)
+        .with_context(|| format!("failed stat {}", unit_path.display()))?
+        .permissions();
+    perms.set_mode(0o644);
+    fs::set_permissions(unit_path, perms)
+        .with_context(|| format!("failed chmod 0644 {}", unit_path.display()))?;
+
+    Ok(())
+}
+
+pub fn render_boot_confirm_service(binary: &Path) -> Result<String> {
+    let bin = binary
+        .to_str()
+        .with_context(|| format!("binary path is non-UTF8: {}", binary.display()))?;
+
+    Ok(format!(
+        r#"[Unit]
+Description=Confirm successful RustyUKI trial boot
+DefaultDependencies=no
+After=local-fs.target
+Before=network.target
+
+[Service]
+Type=oneshot
+ExecStart={bin} confirm
+
+[Install]
+WantedBy=multi-user.target
+"#
+    ))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::render_kernel_install_plugin;
+    use super::{render_boot_confirm_service, render_kernel_install_plugin};
     use std::path::Path;
 
     #[test]
@@ -144,5 +190,16 @@ mod tests {
         .unwrap_or_else(|e| panic!("{e}"));
 
         assert!(!script.contains("exec "));
+    }
+
+    #[test]
+    fn boot_confirm_service_has_early_userspace_ordering() {
+        let unit = render_boot_confirm_service(Path::new("/usr/local/bin/rustyuki"))
+            .unwrap_or_else(|e| panic!("{e}"));
+
+        assert!(unit.contains("Type=oneshot"));
+        assert!(unit.contains("After=local-fs.target"));
+        assert!(unit.contains("Before=network.target"));
+        assert!(unit.contains("ExecStart=/usr/local/bin/rustyuki confirm"));
     }
 }
