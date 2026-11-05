@@ -42,6 +42,18 @@ jobs:
       - name: Rust format check
         run: cargo fmt --all --check
 
+      - name: Cache Cargo registry and dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-checks-fc${{ matrix.fedora_version }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-checks-fc${{ matrix.fedora_version }}-
+
       - name: Rust unit/integration tests
         run: |
           if [[ -f Cargo.lock ]]; then

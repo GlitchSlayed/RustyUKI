@@ -60,10 +60,10 @@ flowchart TD
 
 - **Scope**: Transfers the validated artifact to the destination ESP directory (`/EFI/Linux/` or configured output directory).
 - **Safety & Durability Guarantees**:
-  - **FAT32 Power-Loss Durability**:
-    Calling `rename()` on FAT32 filesystems is not inherently atomic or durable under sudden power loss. RustyUKI writes the staged binary to `.linux-<version>.efi.tmp`, issues `File::sync_all()` to ensure all data clusters are committed to disk, performs atomic rename, and then invokes `sync_all()` on the parent directory to flush directory cluster entries.
-  - **Fallback Slot Preservation**:
-    If an existing UKI is present at the target path, it is moved to `linux-<version>.prev.efi` before replacement. This ensures a known-working fallback boot artifact remains immediately available if the new UKI fails.
+  - **FAT32 Durability & Staging Protocol**:
+    Calling `rename()` on FAT32 filesystems is not inherently atomic or durable under sudden power loss. RustyUKI writes the staged binary to `.linux-<version>.efi.tmp`, issues `File::sync_all()` to ensure all data clusters are committed to physical media, performs an atomic rename, and synchronizes the parent directory using `sync_directory_entry()` (handling VFAT driver `EINVAL`/`ENOTSUP` limitations while strictly catching real I/O failures). Zero-length or truncated files never replace active boot entries.
+  - **Fallback Slot Preservation & Repeatable Recovery**:
+    If an existing UKI is present at the target path, it is moved to `linux-<version>.prev.efi` before replacement. During rollback, the backup slot is staged into a temporary file before renaming, preserving `.prev.efi` intact for repeatable recovery attempts.
   - **Sidecar Provenance Manifest**:
     Every installed UKI is accompanied by a `linux-<version>.efi.manifest.json` file containing metadata: generator version, creation timestamp, SHA-256 hash, cmdline hash, kernel flavor, and backend type.
   - **Foreign UKI Protection**:

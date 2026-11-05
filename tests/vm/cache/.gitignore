@@ -1,0 +1,5 @@
+*.qcow2
+*.iso
+*.raw
+*.tmp
+!manifest.json

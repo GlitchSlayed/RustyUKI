@@ -72,16 +72,28 @@ RustyUKI implements **multi-stage boot health assessment**:
 
 ---
 
-## FAT32 Power-Loss Durability & Cluster Safety
+## FAT32 Durability, Logical Transactions & Firmware Limitations
 
-Calling standard file operations like `rename()` on FAT32 filesystems (typical for EFI System Partitions) does not provide POSIX atomic durability guarantees under unexpected power loss.
+EFI System Partitions are mandated by the UEFI specification to use FAT32 (or FAT16/12 on small media). FAT32 is an unjournaled, non-transactional filesystem without POSIX ACID guarantees. Standard assumptions about atomic directory updates under sudden power loss do not hold on FAT32.
 
-To protect against corrupted or zero-length binaries:
-1. UKIs are assembled in staging storage (`/tmp/rustyuki-staging/` or configured staging path).
-2. The file is copied to a temporary hidden file in the ESP directory: `.linux-<version>.efi.tmp`.
-3. An explicit `sync_all()` is executed on the file handle to guarantee all data clusters are written to physical media.
-4. An atomic directory rename moves `.linux-<version>.efi.tmp` to `linux-<version>.efi`.
-5. An explicit `sync_all()` is issued on the parent directory to guarantee the FAT directory entry is flushed to disk.
+RustyUKI distinguishes between **data cluster synchronization**, **logical transaction recovery**, **atomicity assumptions**, and **power-loss durability guarantees**:
+
+### 1. Data Cluster Synchronization
+- UKIs are initially staged either in temporary system storage or directly as hidden sibling files on the ESP (`.<target>.tmp`).
+- Prior to renaming, an explicit `File::sync_all()` is executed on the open file handle. This ensures all binary data clusters (PE header, kernel, initramfs, cmdline) are flushed from the OS page cache to physical flash media before any directory pointers are modified.
+
+### 2. Logical Transaction Recovery & Backup Preservation
+- **Staging before Rename**: The target binary path (e.g. `linux-<version>.efi`) is never truncated or overwritten in-place.
+- **Rollback Staging**: During rollback recovery, `linux-<version>.prev.efi` is copied into a temporary staging file (`.linux-<version>.efi.rollback.staging`) before being renamed over the active path. The `.prev.efi` recovery slot is preserved intact so repeated recovery attempts remain safe.
+- **Sidecar Provenance Synchronization**: Metadata sidecars (`.manifest.json`) are written and synchronized following the exact same staging protocol.
+
+### 3. VFAT Directory Synchronization Nuances
+- On Linux, calling `fsync()` on a directory file descriptor on a FAT32 filesystem (`vfat`) frequently returns `EINVAL`, `ENOTSUP`, or `ENOSYS`, as the Linux VFAT kernel driver does not implement directory-level fsync.
+- RustyUKI's `sync_directory_entry()` explicitly catches `EINVAL`, `ENOTSUP`, and `ENOSYS` when syncing parent directory entries, logging the limitation while treating it as non-fatal. Genuine I/O hardware errors (e.g. `EIO`, device disconnection) are strictly propagated.
+
+### 4. Realistic Power-Loss Durability Guarantees
+- **What is guaranteed**: If power fails during UKI generation or file copy, the existing active UKI and the `.prev.efi` backup remain unmodified and bootable. Zero-length or truncated files never replace active boot entries.
+- **What is not guaranteed**: Because FAT32 lacks transactional journaling and block-level barriers across directory table updates, catastrophic hardware power loss occurring in the exact microsecond of a FAT directory cluster update cannot be made fully atomic by software alone. In such rare events, standard FAT cluster recovery or chkdsk is required. RustyUKI maximizes safety within the fundamental constraints of UEFI FAT32 media.
 
 ---
 

@@ -1,0 +1,117 @@
+name: Fedora Boot Integration
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - 'src/**'
+      - 'packaging/**'
+      - 'scripts/**'
+      - 'tests/**'
+      - 'Cargo.*'
+      - '.github/workflows/fedora-boot-integration.yml'
+  schedule:
+    - cron: '30 2 * * *'
+  workflow_dispatch:
+    inputs:
+      fedora_version:
+        description: 'Target Fedora Release'
+        required: true
+        default: '45'
+        type: choice
+        options:
+          - '45'
+          - '44'
+      scenario:
+        description: 'Test Scenario'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - 'all'
+          - 'A'
+          - 'B'
+          - 'C'
+          - 'D'
+          - 'negative'
+
+permissions:
+  contents: read
+
+jobs:
+  vm-integration-tests:
+    name: Fedora ${{ matrix.fedora_version }} VM UKI Boot
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        fedora_version: ['45', '44']
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install QEMU and virtualization host packages
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q \
+            qemu-system-x86 \
+            qemu-utils \
+            ovmf \
+            genisoimage \
+            python3
+
+      - name: Verify KVM virtualization availability
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo "KVM acceleration available at /dev/kvm"
+            sudo chmod 666 /dev/kvm || true
+          else
+            echo "WARNING: /dev/kvm not found; QEMU will execute via TCG emulation."
+          fi
+
+      - name: Cache Cargo dependencies and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-host-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-host-${{ runner.os }}-
+
+      - name: Cache Fedora base VM images
+        id: cache-fedora-vm
+        uses: actions/cache@v4
+        with:
+          path: tests/vm/cache
+          key: fedora-vm-cache-v1-${{ matrix.fedora_version }}-${{ hashFiles('scripts/fedora_image_manifest.json') }}
+          restore-keys: |
+            fedora-vm-cache-v1-${{ matrix.fedora_version }}-
+            fedora-vm-cache-v1-
+
+      - name: Build RustyUKI release binary
+        run: cargo build --release
+
+      - name: Run Fedora VM integration scenarios
+        env:
+          INPUT_SCENARIO: ${{ github.event.inputs.scenario || 'all' }}
+        run: |
+          mkdir -p artifacts/vm_logs
+          ./scripts/verify_fedora_vm.py \
+            --release "${{ matrix.fedora_version }}" \
+            --scenario "${INPUT_SCENARIO}" \
+            --accel auto \
+            --cache-dir tests/vm/cache \
+            --artifacts-dir artifacts/vm_logs
+
+      - name: Upload VM serial logs and diagnostic artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fedora-${{ matrix.fedora_version }}-vm-logs-${{ github.run_number }}
+          path: artifacts/vm_logs/*
+          if-no-files-found: ignore

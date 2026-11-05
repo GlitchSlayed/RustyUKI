@@ -1,0 +1,20 @@
+{
+  "images": {
+    "fedora-45-generic": {
+      "release": "45",
+      "flavor": "generic",
+      "filename": "Fedora-Cloud-Base-Generic-45-1.4.x86_64.qcow2",
+      "url": "https://download.fedoraproject.org/pub/fedora/linux/releases/45/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-45-1.4.x86_64.qcow2",
+      "sha256": "50bdc5e70f6a24f540932d15411c1c6ae9fcfa40fb990d876d83c5cc823b2ad0",
+      "description": "Official Fedora 45 Cloud Base Generic (GRUB bootloader, stock kernel, conventional layout)"
+    },
+    "fedora-44-generic": {
+      "release": "44",
+      "flavor": "generic",
+      "filename": "Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2",
+      "url": "https://download.fedoraproject.org/pub/fedora/linux/releases/44/Cloud/x86_64/images/Fedora-Cloud-Base-Generic-44-1.7.x86_64.qcow2",
+      "sha256": "28680fe5b371a5a82ebf43a31926e086a168e59949d03969c5093e7071f90b7f",
+      "description": "Official Fedora 44 Cloud Base Generic (GRUB bootloader, stock kernel, conventional layout)"
+    }
+  }
+}

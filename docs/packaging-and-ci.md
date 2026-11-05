@@ -144,3 +144,24 @@ The workflow in [`.github/workflows/rpm.yml`](../.github/workflows/rpm.yml) vali
    - On every commit push to `main` (as well as nightly schedule and manual dispatch), the pipeline builds binary RPMs and SRPMs targeting Fedora 44 and Fedora 45.
    - Runs full package installation and smoke tests.
    - Automatically publishes a GitHub Release tagged `rpm-nightly-YYYYMMDD-<short-sha>` with all built `.rpm` and `.src.rpm` artifacts attached.
+
+---
+
+## Real Fedora VM Boot Integration Testing (`fedora-boot-integration.yml`)
+
+The workflow in [`.github/workflows/fedora-boot-integration.yml`](../.github/workflows/fedora-boot-integration.yml) executes full-lifecycle UKI boot and management tests on official Fedora installations using QEMU and OVMF UEFI firmware.
+
+### Architecture & Caching Strategy
+- **Base Image Pinned Manifest**: [`scripts/fedora_image_manifest.json`](../scripts/fedora_image_manifest.json) pins official Fedora 45 and Fedora 44 Cloud Base Generic image URLs and cryptographic SHA-256 digests.
+- **Persistent Image Caching**: GitHub Actions restores the verified base `.qcow2` images via `actions/cache@v4` with cache key `fedora-vm-cache-v1-${{ matrix.fedora_version }}-${{ hashFiles('scripts/fedora_image_manifest.json') }}`. Cache misses trigger automatic download and cryptographic verification.
+- **Disposable Overlays**: Tests never mutate the cached base image. Each scenario executes inside a disposable qcow2 overlay with an isolated, disposable copy of `OVMF_VARS.fd`.
+- **Virtualization Acceleration**: Automatically utilizes KVM (`/dev/kvm`) on GitHub-hosted `ubuntu-24.04` runners, falling back to TCG emulation when KVM is unavailable.
+
+### Scenarios Covered
+| Scenario | Backend | Description |
+|---|---|---|
+| **Scenario A** | `systemd-boot` | Fresh conversion from conventional Fedora GRUB to systemd-boot Type #2 UKI, firmware reboot, kernel assertion, and health verification (Mandatory release gate). |
+| **Scenario B** | `direct` | Registration and boot through Direct UEFI firmware entry via `efibootmgr`, trial boot assessment, and boot confirmation. |
+| **Scenario C** | Lifecycle | Multiple kernel versions, automated UKI generation, reconciliation, and safe pruning retaining active and fallback slots. |
+| **Scenario D** | Recovery | Rollback recovery preserving `.prev.efi` fallback slot intact for repeatable recovery operations. |
+| **Negative Verification** | Safety Gate | Deliberately simulates guest assertion failures to verify the harness detects errors and never emits false passes. |
