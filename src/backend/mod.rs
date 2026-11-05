@@ -5,7 +5,7 @@ pub use direct::DirectUefiBackend;
 pub use systemd_boot::SystemdBootBackend;
 
 use crate::cmd::CommandRunner;
-use crate::model::{ActivationResult, BootBackendType, InstalledUki};
+use crate::model::{ActivationResult, BackendDiagnostic, BootBackendType, InstalledUki};
 use anyhow::Result;
 use std::path::Path;
 
@@ -29,6 +29,9 @@ pub trait BootBackend {
 
     /// Queries operational status and boot manager variables.
     fn status(&self, runner: &dyn CommandRunner) -> Result<String>;
+
+    /// Discovers and reports firmware capabilities, quirks, and compatibility diagnostics.
+    fn diagnostics(&self, runner: &dyn CommandRunner) -> Vec<BackendDiagnostic>;
 }
 
 /// Instantiates the appropriate backend based on configuration.

@@ -249,7 +249,15 @@ pub fn rollback(cfg: &AppConfig, kernel_version: &str) -> Result<PathBuf> {
 
 /// Promotes the booted trial image after multi-stage health assessment.
 pub fn confirm(runner: &dyn CommandRunner) -> Result<String> {
-    let backend = create_backend(BootBackendType::Direct);
+    confirm_backend(runner, BootBackendType::Direct)
+}
+
+/// Promotes the booted trial image using the specified boot backend.
+pub fn confirm_backend(
+    runner: &dyn CommandRunner,
+    backend_type: BootBackendType,
+) -> Result<String> {
+    let backend = create_backend(backend_type);
     execute_safe_confirmation(runner, backend.as_ref())
 }
 
@@ -282,10 +290,17 @@ pub fn status(runner: &dyn CommandRunner, cfg: &AppConfig) -> Result<String> {
         cfg.effective_os_release().display()
     ));
 
-    // Backend status
+    // Backend status & diagnostics
     let backend = create_backend(cfg.bootloader.backend);
     if let Ok(b_status) = backend.status(runner) {
         lines.push(b_status);
+    }
+    let diags = backend.diagnostics(runner);
+    if !diags.is_empty() {
+        lines.push("diagnostics:".to_string());
+        for d in diags {
+            lines.push(format!("  [{}] {}: {}", d.level, d.title, d.message));
+        }
     }
 
     // List installed UKIs & provenance

@@ -32,12 +32,43 @@ cp "${OVMF_VARS}" "${VARS_IMG}"
 truncate -s 64M "${DISK_IMG}"
 mkfs.vfat -F 32 -n "ESP" "${DISK_IMG}"
 
-# Create EFI directory structure using mtools if available, or mount loopback
-echo "=== Staging UKI boot directories ==="
-mkdir -p "${WORK_DIR}/esp_mnt/EFI/BOOT"
-mkdir -p "${WORK_DIR}/esp_mnt/EFI/Linux"
+# Create EFI directory structure using mtools
+echo "=== Staging UKI boot directories into virtual ESP image ==="
+mmd -i "${DISK_IMG}" ::EFI ::EFI/BOOT ::EFI/Linux
 
-# Build a stub test UKI or use release binary
+# Create a stub PE binary for UEFI direct boot and Type #2 systemd-boot discovery
+STUB_PE="${WORK_DIR}/stub.efi"
+printf "MZ\x90\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00" > "${STUB_PE}"
+truncate -s 2M "${STUB_PE}"
+
+# 1. Direct UKI fallback slot and default bootloader
+mcopy -i "${DISK_IMG}" "${STUB_PE}" ::EFI/BOOT/BOOTX64.EFI
+
+# 2. systemd-boot Type #2 UKI specification
+mcopy -i "${DISK_IMG}" "${STUB_PE}" ::EFI/Linux/linux-6.17.4-test.efi
+mcopy -i "${DISK_IMG}" "${STUB_PE}" ::EFI/Linux/linux-6.17.4-test.prev.efi
+
+# Create sidecar provenance manifest
+MANIFEST="${WORK_DIR}/linux-6.17.4-test.efi.manifest.json"
+cat << 'EOF' > "${MANIFEST}"
+{
+  "schema_version": 1,
+  "generator": "rustyuki",
+  "generator_version": "0.2.0",
+  "kernel_version": "6.17.4-test",
+  "created_at": "2026-11-05T19:54:00Z",
+  "uki_sha256": "mock-sha256-test",
+  "cmdline_hash": "mock-cmdline-hash",
+  "backend": "systemd-boot",
+  "flavor": "fedora"
+}
+EOF
+mcopy -i "${DISK_IMG}" "${MANIFEST}" ::EFI/Linux/linux-6.17.4-test.efi.manifest.json
+
+echo "=== Verifying virtual ESP directory contents ==="
+minfo -i "${DISK_IMG}" ::
+mdir -i "${DISK_IMG}" ::EFI/Linux
+
 echo "=== Verifying OVMF firmware loads disk and executes EFI environment ==="
 timeout 10s "${QEMU_BIN}" \
     -nodefaults \

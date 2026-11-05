@@ -71,21 +71,34 @@ flowchart TD
 
 ### Stage 3: Boot Activation
 
-RustyUKI supports two pluggable boot management backends configured via `config.toml` (`[bootloader.backend]`):
+RustyUKI supports two pluggable, first-class boot management backends configured via `config.toml` (`[bootloader.backend]`):
 
-#### 1. Direct UEFI Backend (`backend = "direct"`)
+#### 1. systemd-boot Backend (`backend = "systemd-boot"`) — Primary Production Priority
+Leverages `systemd-boot` to manage and launch Type #2 UKIs:
+- **Type #2 Specification**: Discovers UKIs placed under `/EFI/Linux/` automatically.
+- **Boot Counting & Assessment**: Integrates with `systemd-bless-boot` and boot counting counters to assess health.
+- **NVRAM Isolation**: Avoids creating per-kernel NVRAM firmware entries, preventing NVRAM capacity exhaustion on motherboards with constrained variable storage.
+- **Synchronization**: Executes `bootctl update` to ensure bootloader binaries and partition metadata are synchronized.
+- **Trial & Default Management**: Executes `bootctl set-oneshot <entry>` for one-time trial boots, and `bootctl set-default <entry>` for permanent default selection.
+
+#### 2. Direct UEFI Backend (`backend = "direct"`) — First-Class Architectural Backend
 Firmware directly executes the UKI without intermediate bootloader code:
 - **Partition Discovery**: Resolves the underlying block device and partition number via `findmnt` and `lsblk`.
 - **Deduplication**: Audits existing NVRAM entries to avoid accumulating duplicate boot entries across kernel updates.
-- **Trial Booting (`BootNext`)**: When trial boot is requested (or during initial installation), RustyUKI arms `BootNext` pointing to the new entry without modifying the default `BootOrder`.
+- **Trial Booting (`BootNext`)**: When trial boot is requested (or during initial installation), RustyUKI arms `BootNext` pointing to the new entry without modifying the permanent `BootOrder`.
 - **Safe BootOrder Promotion**: During confirmation, the trial entry is promoted to index 0 of `BootOrder` and `BootNext` is cleared.
+- **Firmware Diagnostics**: Proactively monitors NVRAM entry counts and reports firmware limitations (e.g. vendors that drop BootOrder variables).
 
-#### 2. systemd-boot Backend (`backend = "systemd-boot"`)
-Uses `systemd-boot` to manage and launch Type #2 UKIs:
-- **Type #2 Specification**: Discovers UKIs placed under `/EFI/Linux/`.
-- **Synchronization**: Executes `bootctl update` to ensure bootloader binaries and partition metadata are synchronized.
-- **Trial Booting**: Executes `bootctl set-oneshot <entry>` for one-time trial boots.
-- **Default Promotion**: Promotes default kernel with `bootctl set-default <entry>`.
+---
+
+## Distribution Neutrality & Installer Policy Separation
+
+RustyUKI remains strictly distribution-independent and backend-neutral:
+- **Downstream Choice**: Distribution installers (such as GOFR) choose their own default boot policy (for example, defaulting to `systemd-boot` for standardized multi-kernel selection and labeling Direct UKI according to their hardware qualification status).
+- **No Hardcoded Biases**: RustyUKI does not hardcode installer branding or permanently label any backend as an experimental afterthought.
+- **Transparent Diagnostics**: Exposes backend capabilities, diagnostics, and known limitations via `rustyuki status` so administrators and installers can make informed decisions based on their hardware environment.
+
+---
 
 ---
 

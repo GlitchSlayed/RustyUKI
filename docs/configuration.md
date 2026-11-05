@@ -54,8 +54,10 @@ extra_args = []
 extra_args = []
 
 [bootloader]
-# Boot management backend: "direct" (Direct UEFI via efibootmgr) or "systemd-boot".
-backend = "direct"
+# Boot management backend: "systemd-boot" or "direct"
+# - "systemd-boot": Standardized Type #2 UKI discovery under /EFI/Linux, kernel selection, and boot counting.
+# - "direct": Direct UEFI execution via efibootmgr entries (no intermediate bootloader).
+backend = "systemd-boot"
 
 # Automatically arm one-shot trial boot for newly generated UKIs.
 trial_boot = true
@@ -107,7 +109,7 @@ token = ""
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `backend` | String | `"direct"` | Boot backend: `"direct"` for Direct UEFI firmware execution or `"systemd-boot"` for Type #2 UKIs under `/EFI/Linux/`. |
+| `backend` | String | `"systemd-boot"` | Boot backend: `"systemd-boot"` (default) for standardized Type #2 UKIs under `/EFI/Linux/` or `"direct"` for Direct UEFI firmware execution. |
 | `trial_boot` | Boolean | `true` | Arms a one-time trial boot (`BootNext` or `bootctl set-oneshot`) during installation. |
 | `keep_backup` | Boolean | `true` | Preserves the previous UKI as `linux-<version>.prev.efi` for instant rollback. |
 | `prune_stale_images` | Boolean | `true` | Cleans up UKIs for uninstalled kernels during reconciliation, verifying provenance sidecars (`.manifest.json`). |

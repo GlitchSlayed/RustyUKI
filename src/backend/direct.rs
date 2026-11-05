@@ -1,7 +1,7 @@
 use super::{ActivationResult, BootBackend};
 use crate::cmd::CommandRunner;
 use crate::esp::make_efi_loader_path;
-use crate::model::{BootBackendType, InstalledUki};
+use crate::model::{BackendDiagnostic, BootBackendType, DiagnosticLevel, InstalledUki};
 use anyhow::{bail, Context, Result};
 use log::info;
 use std::collections::HashSet;
@@ -204,6 +204,87 @@ impl BootBackend for DirectUefiBackend {
         lines.push(format!("  Entries:     {} registered", state.entries.len()));
 
         Ok(lines.join("\n"))
+    }
+
+    fn diagnostics(&self, runner: &dyn CommandRunner) -> Vec<BackendDiagnostic> {
+        let mut diags = Vec::new();
+
+        // 1. Check efibootmgr availability
+        if runner.run("which", &["efibootmgr"]).is_ok() {
+            diags.push(BackendDiagnostic {
+                level: DiagnosticLevel::Ok,
+                title: "efibootmgr CLI Available".to_string(),
+                message: "UEFI NVRAM management utility (efibootmgr) is installed on host."
+                    .to_string(),
+            });
+        } else {
+            diags.push(BackendDiagnostic {
+                level: DiagnosticLevel::Error,
+                title: "efibootmgr Missing".to_string(),
+                message:
+                    "efibootmgr is not installed. Install efibootmgr to use Direct UEFI backend."
+                        .to_string(),
+            });
+            return diags;
+        }
+
+        // 2. Query firmware NVRAM state
+        match query_boot_state(runner) {
+            Ok(state) => {
+                diags.push(BackendDiagnostic {
+                    level: DiagnosticLevel::Ok,
+                    title: "UEFI NVRAM Accessible".to_string(),
+                    message: format!(
+                        "Firmware reported {} boot entries; BootOrder has {} entries.",
+                        state.entries.len(),
+                        state.order.len()
+                    ),
+                });
+
+                if state.entries.len() > 30 {
+                    diags.push(BackendDiagnostic {
+                        level: DiagnosticLevel::Warning,
+                        title: "High NVRAM Entry Count".to_string(),
+                        message: format!(
+                            "Detected {} EFI boot entries. Motherboards with limited NVRAM capacity may fail to write new entries. Consider cleaning old entries or using systemd-boot.",
+                            state.entries.len()
+                        ),
+                    });
+                }
+
+                // Check for duplicates
+                let mut labels = HashSet::new();
+                for e in &state.entries {
+                    if !labels.insert(&e.label) {
+                        diags.push(BackendDiagnostic {
+                            level: DiagnosticLevel::Warning,
+                            title: "Duplicate Boot Entry Detected".to_string(),
+                            message: format!(
+                                "Multiple boot entries with label '{}' exist in NVRAM.",
+                                e.label
+                            ),
+                        });
+                        break;
+                    }
+                }
+            }
+            Err(e) => {
+                diags.push(BackendDiagnostic {
+                    level: DiagnosticLevel::Warning,
+                    title: "UEFI NVRAM Query Inconclusive".to_string(),
+                    message: format!("Could not inspect EFI boot variables: {e:#}"),
+                });
+            }
+        }
+
+        // 3. Firmware compatibility advisory
+        diags.push(BackendDiagnostic {
+            level: DiagnosticLevel::Info,
+            title: "Direct UEFI Execution & Firmware Compatibility".to_string(),
+            message: "Direct UKI executes without an intermediate bootloader. Requires UEFI firmware with reliable BootNext and BootOrder variable retention.".to_string(),
+        });
+
+        diags
     }
 }
 

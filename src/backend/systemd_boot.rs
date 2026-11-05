@@ -1,6 +1,6 @@
 use super::{ActivationResult, BootBackend};
 use crate::cmd::CommandRunner;
-use crate::model::{BootBackendType, InstalledUki};
+use crate::model::{BackendDiagnostic, BootBackendType, DiagnosticLevel, InstalledUki};
 use anyhow::{Context, Result};
 use log::info;
 use std::path::Path;
@@ -117,5 +117,82 @@ impl BootBackend for SystemdBootBackend {
         }
 
         Ok(lines.join("\n"))
+    }
+
+    fn diagnostics(&self, runner: &dyn CommandRunner) -> Vec<BackendDiagnostic> {
+        let mut diags = Vec::new();
+
+        // 1. Check bootctl availability
+        if runner.run("which", &["bootctl"]).is_ok() {
+            diags.push(BackendDiagnostic {
+                level: DiagnosticLevel::Ok,
+                title: "bootctl CLI Available".to_string(),
+                message: "systemd-boot management utility (bootctl) is installed on host."
+                    .to_string(),
+            });
+        } else {
+            diags.push(BackendDiagnostic {
+                level: DiagnosticLevel::Error,
+                title: "bootctl Missing".to_string(),
+                message: "bootctl is not installed. Install systemd-boot to use this backend."
+                    .to_string(),
+            });
+            return diags;
+        }
+
+        // 2. Check if systemd-boot is installed into ESP
+        let status_res = runner.run("bootctl", &["status"]);
+        match status_res {
+            Ok(out) => {
+                if out.stdout.contains("systemd-boot not installed") {
+                    diags.push(BackendDiagnostic {
+                        level: DiagnosticLevel::Warning,
+                        title: "systemd-boot Not Initialized in ESP".to_string(),
+                        message: "systemd-boot is not currently active on this ESP. Run 'bootctl install' to initialize.".to_string(),
+                    });
+                } else {
+                    diags.push(BackendDiagnostic {
+                        level: DiagnosticLevel::Ok,
+                        title: "systemd-boot Installed in ESP".to_string(),
+                        message:
+                            "Firmware loader is initialized and active on the EFI System Partition."
+                                .to_string(),
+                    });
+                }
+            }
+            Err(e) => {
+                diags.push(BackendDiagnostic {
+                    level: DiagnosticLevel::Warning,
+                    title: "bootctl Status Check Inconclusive".to_string(),
+                    message: format!("Could not query bootctl status: {e:#}"),
+                });
+            }
+        }
+
+        // 3. Check systemd-bless-boot availability for boot assessment
+        if runner.run("which", &["systemd-bless-boot"]).is_ok() {
+            diags.push(BackendDiagnostic {
+                level: DiagnosticLevel::Ok,
+                title: "Boot Assessment Support".to_string(),
+                message:
+                    "systemd-bless-boot is available for automatic boot counting verification."
+                        .to_string(),
+            });
+        } else {
+            diags.push(BackendDiagnostic {
+                level: DiagnosticLevel::Info,
+                title: "systemd-bless-boot Absent".to_string(),
+                message: "systemd-bless-boot is not present; standard systemd-boot fallback will be used.".to_string(),
+            });
+        }
+
+        // 4. Expose architecture & capability
+        diags.push(BackendDiagnostic {
+            level: DiagnosticLevel::Info,
+            title: "Type #2 Specification & NVRAM Isolation".to_string(),
+            message: "Discovers UKIs under /EFI/Linux/. Kernel selection and counting handled without per-kernel NVRAM entries.".to_string(),
+        });
+
+        diags
     }
 }

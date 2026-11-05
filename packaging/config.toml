@@ -45,8 +45,10 @@ extra_args = []
 extra_args = []
 
 [bootloader]
-# Boot management backend: "direct" (Direct UEFI via efibootmgr) or "systemd-boot"
-backend = "direct"
+# Boot management backend: "systemd-boot" or "direct"
+# - "systemd-boot": Standardized Type #2 UKI discovery under /EFI/Linux, kernel selection, and boot counting.
+# - "direct": Direct UEFI execution via efibootmgr entries (no intermediate bootloader).
+backend = "systemd-boot"
 
 # Automatically arm one-shot trial boot for newly generated UKIs
 trial_boot = true

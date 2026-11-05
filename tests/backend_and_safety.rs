@@ -6,7 +6,7 @@ use rustyuki::backend::BootBackend;
 use rustyuki::build::signing::{sign_uki_if_configured, SigningConfig};
 use rustyuki::cmd::{CommandRunner, ProcessOutput};
 use rustyuki::install::{install_uki_to_esp, rollback_kernel_uki};
-use rustyuki::model::{BootBackendType, InstalledUki, KernelFlavor, UkiArtifact};
+use rustyuki::model::{BootBackendType, DiagnosticLevel, InstalledUki, KernelFlavor, UkiArtifact};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -331,5 +331,86 @@ fn test_signing_with_sbsign() {
     let signed = sign_uki_if_configured(&runner, &uki_file, &signing_cfg).unwrap();
     assert_eq!(signed, uki_file);
     assert_eq!(std::fs::read(&signed).unwrap(), b"MZ-signed-uki-content");
+    runner.assert_complete();
+}
+
+#[test]
+fn test_systemd_boot_diagnostics_reports_capabilities() {
+    let runner = TestMockRunner::new(vec![
+        MockCall {
+            program: "which".to_string(),
+            args: vec!["bootctl".to_string()],
+            output: Ok(ProcessOutput {
+                stdout: "/usr/bin/bootctl\n".to_string(),
+                stderr: String::new(),
+            }),
+        },
+        MockCall {
+            program: "bootctl".to_string(),
+            args: vec!["status".to_string()],
+            output: Ok(ProcessOutput {
+                stdout: "systemd-boot 257.2-1.fc44 installed in ESP\n".to_string(),
+                stderr: String::new(),
+            }),
+        },
+        MockCall {
+            program: "which".to_string(),
+            args: vec!["systemd-bless-boot".to_string()],
+            output: Ok(ProcessOutput {
+                stdout: "/usr/bin/systemd-bless-boot\n".to_string(),
+                stderr: String::new(),
+            }),
+        },
+    ]);
+
+    let backend = SystemdBootBackend;
+    let diags = backend.diagnostics(&runner);
+    assert!(diags
+        .iter()
+        .any(|d| d.level == DiagnosticLevel::Ok && d.title.contains("bootctl CLI Available")));
+    assert!(diags.iter().any(
+        |d| d.level == DiagnosticLevel::Ok && d.title.contains("systemd-boot Installed in ESP")
+    ));
+    assert!(diags
+        .iter()
+        .any(|d| d.level == DiagnosticLevel::Ok && d.title.contains("Boot Assessment Support")));
+    assert!(diags
+        .iter()
+        .any(|d| d.level == DiagnosticLevel::Info && d.title.contains("Type #2 Specification")));
+    runner.assert_complete();
+}
+
+#[test]
+fn test_direct_uefi_diagnostics_reports_nvram_entries() {
+    let runner = TestMockRunner::new(vec![
+        MockCall {
+            program: "which".to_string(),
+            args: vec!["efibootmgr".to_string()],
+            output: Ok(ProcessOutput {
+                stdout: "/usr/bin/efibootmgr\n".to_string(),
+                stderr: String::new(),
+            }),
+        },
+        MockCall {
+            program: "efibootmgr".to_string(),
+            args: vec!["--verbose".to_string()],
+            output: Ok(ProcessOutput {
+                stdout: "BootCurrent: 0001\nBootOrder: 0001,0002\nBoot0001* Fedora\tHD(...)\nBoot0002* Linux UKI\tHD(...)\n".to_string(),
+                stderr: String::new(),
+            }),
+        },
+    ]);
+
+    let backend = DirectUefiBackend;
+    let diags = backend.diagnostics(&runner);
+    assert!(diags
+        .iter()
+        .any(|d| d.level == DiagnosticLevel::Ok && d.title.contains("efibootmgr CLI Available")));
+    assert!(diags
+        .iter()
+        .any(|d| d.level == DiagnosticLevel::Ok && d.title.contains("UEFI NVRAM Accessible")));
+    assert!(diags
+        .iter()
+        .any(|d| d.level == DiagnosticLevel::Info && d.title.contains("Direct UEFI Execution")));
     runner.assert_complete();
 }

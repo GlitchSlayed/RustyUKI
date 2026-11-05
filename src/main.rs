@@ -3,7 +3,7 @@ use clap::Parser;
 use env_logger::Env;
 use log::LevelFilter;
 use rustyuki::app::{
-    confirm, generate, install, reconcile, resolve_generate_settings, rollback, status,
+    confirm_backend, generate, install, reconcile, resolve_generate_settings, rollback, status,
 };
 use rustyuki::backend::create_backend;
 use rustyuki::cli::{Cli, Commands, GenerateArgs};
@@ -133,7 +133,7 @@ fn run() -> Result<()> {
         }
         Commands::Confirm => {
             require_root_if_live(false)?;
-            let boot_num = confirm(&runner)?;
+            let boot_num = confirm_backend(&runner, cfg.bootloader.backend)?;
             println!("confirmed {boot_num} as the permanent default boot entry");
         }
     }

@@ -5,11 +5,11 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum BootBackendType {
-    /// Firmware directly executes the UKI via UEFI boot entries.
-    #[default]
-    Direct,
     /// systemd-boot manages and launches UKIs under /EFI/Linux.
+    #[default]
     SystemdBoot,
+    /// Firmware directly executes the UKI via UEFI boot entries.
+    Direct,
 }
 
 impl std::str::FromStr for BootBackendType {
@@ -33,6 +33,35 @@ impl std::fmt::Display for BootBackendType {
             Self::SystemdBoot => write!(f, "systemd-boot"),
         }
     }
+}
+
+/// Diagnostic severity level for backend capabilities and environment checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum DiagnosticLevel {
+    Info,
+    Ok,
+    Warning,
+    Error,
+}
+
+impl std::fmt::Display for DiagnosticLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Info => write!(f, "INFO"),
+            Self::Ok => write!(f, "OK"),
+            Self::Warning => write!(f, "WARNING"),
+            Self::Error => write!(f, "ERROR"),
+        }
+    }
+}
+
+/// Structured diagnostic reporting capabilities, firmware quirks, and limitations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackendDiagnostic {
+    pub level: DiagnosticLevel,
+    pub title: String,
+    pub message: String,
 }
 
 /// Distribution kernel flavor categorization.

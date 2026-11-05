@@ -95,8 +95,8 @@ flowchart LR
 ## Key Features
 
 - **Dual Boot Backends**:
-  - **Direct UEFI** (preferred): Firmware executes UKIs directly. Manages NVRAM entries, avoids duplicates, and arms `BootNext`.
-  - **systemd-boot**: Supports Type #2 UKIs under `/EFI/Linux/`, `bootctl update`, and `systemd-bless-boot`.
+  - **systemd-boot** (default): Standardized Type #2 UKI discovery under `/EFI/Linux/`, `bootctl update`, multi-kernel selection, and `systemd-bless-boot` boot counting without per-kernel NVRAM entries.
+  - **Direct UEFI** (first-class): Firmware executes UKIs directly. Manages NVRAM entries, avoids duplicates, arms `BootNext` trial booting, and provides firmware NVRAM diagnostics.
 - **Multi-Stage Health Assessment**:
   Prevents premature boot confirmation. `rustyuki confirm` verifies that userspace reached target operational status via `systemctl is-system-running`. Refuses confirmation if in `emergency`, `rescue`, or `maintenance` mode.
 - **Fallback Slots (`.prev.efi`) & Rollback**:
@@ -180,7 +180,7 @@ auto_detect_cmdline = true
 cmdline_file = "/etc/kernel/cmdline"
 
 [bootloader]
-backend = "direct"       # "direct" or "systemd-boot"
+backend = "systemd-boot" # "systemd-boot" or "direct"
 trial_boot = true        # Arm one-shot trial on install
 keep_backup = true       # Retain .prev.efi fallback slot
 prune_stale_images = true
