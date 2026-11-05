@@ -27,6 +27,7 @@
 ## Table of Contents
 
 - [What is RustyUKI?](#what-is-rustyuki)
+- [Documentation](#documentation)
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Configuration](#configuration)
@@ -66,6 +67,22 @@ Also.........Huge theoretical boot speed improvements.
 
 ---
 
+## Documentation
+
+Full in-depth documentation is available in the [`docs/`](./docs/) directory:
+
+| Guide | Description |
+|---|---|
+| [**Architecture & Pipeline**](./docs/architecture.md) | Two-stage build pipeline (`dracut` + `ukify`), atomic write guarantees, and UEFI NVRAM registration. |
+| [**CLI Reference**](./docs/cli.md) | Exhaustive command, flag, argument, override, and exit code reference. |
+| [**Configuration Guide**](./docs/configuration.md) | `/etc/uki/uki.conf` schema, cmdline auto-detection hierarchy, and metadata caching. |
+| [**Boot Safety & Trial Workflow**](./docs/boot-flow-and-safety.md) | Fail-safe `BootNext` trial booting, `rustyuki-boot-confirm.service`, and GPT autodiscovery advisory. |
+| [**Automated Kernel Hook**](./docs/kernel-hook.md) | Hands-off `kernel-install` plugin integration for `dnf update kernel` triggers. |
+| [**Backups & Emergency Recovery**](./docs/recovery.md) | Pre-installation backups, Live USB rescue procedures, and restoring legacy GRUB entries. |
+| [**Packaging & CI/CD**](./docs/packaging-and-ci.md) | RPM spec packaging, automated nightly GitHub Releases, and containerized CI checks. |
+
+---
+
 ## Requirements
 
 > [!IMPORTANT]
@@ -89,7 +106,17 @@ mount | grep -i efi
 
 ## Installation
 
-### Build from source
+### Option 1 — Install via automated nightly RPM (Recommended for Fedora)
+
+Automated nightly RPM builds are published via GitHub Releases on every update:
+
+```bash
+# Download the latest RPM from GitHub Releases:
+# https://github.com/GlitchSlayed/RustyUKI/releases
+sudo dnf install https://github.com/GlitchSlayed/RustyUKI/releases/download/rpm-nightly-YYYYMMDD/rustyuki-0.2.0-1.fc41.x86_64.rpm
+```
+
+### Option 2 — Build from source
 
 ```bash
 git clone https://github.com/GlitchSlayed/RustyUKI.git
@@ -110,10 +137,7 @@ rustyuki --version
 sudo rustyuki install-hook
 ```
 
-This installs a `kernel-install` plugin at `/usr/lib/kernel/install.d/90-rustyuki.install`. After this, every `dnf update kernel` or kernel package transaction will automatically rebuild or prune your UKIs without any manual intervention.
-
-> [!NOTE]
-> Pre-built binaries and RPM packages are planned for a future release. See [Roadmap](#roadmap).
+This installs a `kernel-install` plugin at `/usr/lib/kernel/install.d/90-rustyuki.install`. After this, every `dnf update kernel` or kernel package transaction will automatically rebuild or prune your UKIs without any manual intervention. See [Automated Kernel Updates](./docs/kernel-hook.md) for details.
 
 ---
 
@@ -191,9 +215,9 @@ rustyuki [OPTIONS] <COMMAND>
 
 ### Subcommands
 
-#### `status` — Inspect resolved runtime configuration
+#### `status` — Inspect resolved runtime configuration & boot environment
 
-Prints the effective config after merging the config file and any CLI overrides. **Run this first before every build.**
+Prints the effective config after merging the config file and CLI overrides, and inspects your root partition to advise if GPT autodiscovery (Discoverable Partitions Specification) makes `root=` in your cmdline redundant. **Run this first before every build.**
 
 ```bash
 sudo rustyuki status
@@ -492,10 +516,12 @@ echo "Run 'sudo rustyuki status' to verify target kernel version."
 
 ```
 RustyUKI/
+├── docs/                 # Detailed guides and architecture documentation
 ├── src/                  # Rust source
 ├── tests/                # Integration tests
 ├── .github/
-│   └── workflows/        # CI pipelines
+│   ├── rpm/              # Fedora RPM spec file
+│   └── workflows/        # CI and automated RPM release workflows
 ├── Cargo.toml
 └── README.md
 ```
@@ -526,11 +552,14 @@ These projects and tools shaped both the current implementation and the roadmap 
 
 ### Recently shipped
 
-- **BootNext trial boot workflow** — `--boot-once` now schedules a one-time trial boot and `rustyuki confirm` promotes the successful entry afterward.
-- **ESP preflight validation** — generation now checks mount presence, mount state, free space, and output directory writability before writing a UKI.
-- **Fedora `kernel-install` hook support** — RustyUKI can install a plugin so kernel add/remove events now trigger targeted UKI generation on adds and reconciliation on removals automatically.
+- **Comprehensive Documentation Suite** — fully documented `/docs` covering architecture, CLI commands, configuration schema, boot trial workflow, kernel hooks, and emergency recovery.
+- **BootNext trial boot workflow** — `--boot-once` and `rustyuki install` schedule a one-time trial boot, and `rustyuki confirm` (via `rustyuki-boot-confirm.service`) promotes the entry upon verified boot.
+- **ESP preflight validation** — generation checks mount presence, read-only status, available space (<50MB abort, <150MB warn), and output directory writability.
+- **GPT autodiscovery advisory** — `rustyuki status` inspects root partition type GUIDs against UAPI DPS standards and warns if `root=` in cmdline is redundant.
+- **Fedora `kernel-install` hook support** — RustyUKI installs a plugin so kernel add/remove events trigger targeted UKI generation on adds and reconciliation on removals automatically.
 - **Multi-kernel reconciliation and stale artifact cleanup** — `rustyuki reconcile` rebuilds installed kernels and prunes stale `linux-*.efi` outputs.
-- **RPM workflow consolidation** — Fedora RPM CI and scheduled release automation now live in the single `rpm.yml` workflow.
+- **Automated Fedora RPM builds & Nightly Releases** — `.github/rpm/rustyuki.spec` spec file with automated daily GitHub Releases publishing `.rpm` and `.src.rpm` packages.
+- **Clippy and Rustfmt in CI** — automated formatting checks and strict `cargo clippy --all-targets -- -D warnings` enforced across PRs and pushes.
 
 ### 1. Safety & Boot Entry Management
 
@@ -539,7 +568,6 @@ These projects and tools shaped both the current implementation and the roadmap 
 ### 2. Fedora Integration
 
 - [ ] **Boot environment awareness in `status`** — surface EFI boot entry details via `kernel-bootcfg --show` when available, with `efibootmgr -v` as a fallback.
-- [ ] **GPT autodiscovery advisory** — detect discoverable root partitions and warn when `root=` is redundant or stale.
 - [ ] **Supported architectures** — keep short-term guards in place for x86_64-only assumptions today, while planning full aarch64 support later.
 - [ ] **Nobara Linux support** — detect Nobara-specific paths and dracut quirks; full pipeline testing.
 
@@ -560,10 +588,7 @@ These projects and tools shaped both the current implementation and the roadmap 
 
 ### 5. CI, Packaging & Releases
 
-- [ ] **Packaged releases** — publish pre-built binaries via GitHub Releases with SHA256 checksums.
-- [ ] **RPM spec packaging** — complete `dnf install rustyuki` support for Fedora-based systems.
-- [ ] **Clippy in CI** — add `cargo clippy --all-targets -- -D warnings` as a required check.
-- [ ] **Pinned Fedora container digests** — pin workflow container images for better reproducibility.
+- [ ] **Pinned Fedora container digests** — pin workflow container images with full SHA256 image digests for ultimate reproducibility.
 
 ### 6. UX & Longer-term Ideas
 
