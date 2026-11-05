@@ -64,13 +64,16 @@ on:
 permissions:
   contents: read
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   vm-integration-tests:
     name: Fedora ${{ inputs.fedora_version || '45' }} UEFI Boot (${{ inputs.boot_backend || 'both' }})
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install QEMU and virtualization host packages
         run: |
@@ -95,7 +98,7 @@ jobs:
           fi
 
       - name: Cache Cargo dependencies and target
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index/
@@ -108,7 +111,7 @@ jobs:
 
       - name: Cache Fedora base VM images
         id: cache-fedora-vm
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: tests/vm/cache
           key: fedora-vm-cache-v1-${{ inputs.fedora_version || '45' }}-${{ hashFiles('scripts/fedora_image_manifest.json') }}
@@ -183,7 +186,7 @@ jobs:
 
       - name: Upload VM serial logs and diagnostic artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fedora-${{ inputs.fedora_version || '45' }}-vm-logs-${{ github.run_number }}
           path: artifacts/vm_logs/*

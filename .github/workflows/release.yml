@@ -19,6 +19,9 @@ on:
 permissions:
   contents: write
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   qualify-boot:
     name: Mandatory UEFI Boot Qualification Gate
@@ -54,10 +57,22 @@ jobs:
             systemd-rpm-macros
 
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@v7
 
       - name: Mark workspace as a safe Git directory
         run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+
+      - name: Cache Cargo registry and target
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-release-fc${{ matrix.fedora_version }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-release-fc${{ matrix.fedora_version }}-
 
       - name: Build SRPM/RPM using Fedora rpm macros
         run: |
@@ -91,7 +106,7 @@ jobs:
           test -f /usr/lib/systemd/system/rustyuki-boot-confirm.service
 
       - name: Upload RPM artifacts
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: fedora-${{ matrix.fedora_version }}-release-rpms
           path: dist/*
@@ -106,13 +121,13 @@ jobs:
 
     steps:
       - name: Download all release RPM artifacts
-        uses: actions/download-artifact@v5
+        uses: actions/download-artifact@v8
         with:
           path: dist-all
           merge-multiple: true
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:

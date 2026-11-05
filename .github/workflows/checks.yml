@@ -18,7 +18,7 @@ jobs:
       # Targets latest 2 Fedora releases
       image: fedora:${{ matrix.fedora_version }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install check dependencies
         run: |
@@ -43,7 +43,7 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Cache Cargo registry and dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry/index/
