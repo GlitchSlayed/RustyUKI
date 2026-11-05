@@ -46,27 +46,7 @@ pub fn resolve_cmdline(runner: &dyn CommandRunner, settings: &CmdlineSettings) -
     let sysroot = settings.sysroot.as_deref();
 
     if settings.auto_detect {
-        // In offline sysroot mode, do NOT inspect the host's /proc/cmdline!
-        if sysroot.is_none() {
-            // Check cache with content hash validation
-            if let Some(cached) = load_cached_cmdline(settings)? {
-                return validate_final_cmdline(runner, &cached, "cached metadata", true, settings);
-            }
-
-            // Live host /proc/cmdline
-            if let Ok(proc_cmdline) = fs::read_to_string("/proc/cmdline") {
-                let clean = sanitize_cmdline(&proc_cmdline);
-                if looks_bootable(&clean) {
-                    let value =
-                        validate_final_cmdline(runner, &clean, "/proc/cmdline", true, settings)?;
-                    let _ =
-                        persist_cmdline_metadata(settings, &value, "/proc/cmdline", &proc_cmdline);
-                    return Ok(value);
-                }
-            }
-        }
-
-        // Target cmdline file (/etc/kernel/cmdline)
+        // Target cmdline file (/etc/kernel/cmdline or explicit override)
         let cmdline_path = sysroot_path(sysroot, &settings.cmdline_file);
         if let Ok(file_cmdline) = fs::read_to_string(&cmdline_path) {
             let clean = sanitize_cmdline(&file_cmdline);
@@ -85,6 +65,26 @@ pub fn resolve_cmdline(runner: &dyn CommandRunner, settings: &CmdlineSettings) -
                     &file_cmdline,
                 );
                 return Ok(value);
+            }
+        }
+
+        // In offline sysroot mode, do NOT inspect the host's /proc/cmdline!
+        if sysroot.is_none() {
+            // Check cache with content hash validation
+            if let Some(cached) = load_cached_cmdline(settings)? {
+                return validate_final_cmdline(runner, &cached, "cached metadata", true, settings);
+            }
+
+            // Live host /proc/cmdline
+            if let Ok(proc_cmdline) = fs::read_to_string("/proc/cmdline") {
+                let clean = sanitize_cmdline(&proc_cmdline);
+                if looks_bootable(&clean) {
+                    let value =
+                        validate_final_cmdline(runner, &clean, "/proc/cmdline", true, settings)?;
+                    let _ =
+                        persist_cmdline_metadata(settings, &value, "/proc/cmdline", &proc_cmdline);
+                    return Ok(value);
+                }
             }
         }
 
@@ -115,6 +115,9 @@ pub fn resolve_cmdline(runner: &dyn CommandRunner, settings: &CmdlineSettings) -
 
 fn sysroot_path(sysroot: Option<&Path>, subpath: &Path) -> PathBuf {
     if let Some(root) = sysroot {
+        if subpath.starts_with(root) {
+            return subpath.to_path_buf();
+        }
         if subpath.is_absolute() {
             let stripped = subpath.strip_prefix("/").unwrap_or(subpath);
             root.join(stripped)

@@ -140,6 +140,9 @@ impl AppConfig {
     /// Resolves an absolute path considering the configured sysroot.
     pub fn resolve_path(&self, subpath: &Path) -> PathBuf {
         if let Some(sysroot) = &self.uki.sysroot {
+            if subpath.starts_with(sysroot) {
+                return subpath.to_path_buf();
+            }
             if subpath.is_absolute() {
                 let stripped = subpath.strip_prefix("/").unwrap_or(subpath);
                 sysroot.join(stripped)

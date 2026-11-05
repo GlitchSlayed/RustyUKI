@@ -108,31 +108,7 @@ pub fn install_uki_to_esp(
     })?;
 
     // Commit directory entry on FAT32
-    let dir_file = File::open(output_dir).with_context(|| {
-        format!(
-            "failed opening directory {} for durability sync",
-            output_dir.display()
-        )
-    })?;
-    if let Err(e) = dir_file.sync_all() {
-        let is_unsupported = e.kind() == std::io::ErrorKind::Unsupported
-            || e.raw_os_error() == Some(22)  // EINVAL
-            || e.raw_os_error() == Some(95)  // ENOTSUP / EOPNOTSUPP
-            || e.raw_os_error() == Some(38); // ENOSYS
-        if is_unsupported {
-            log::debug!(
-                "Directory sync not supported by filesystem at {}: {e}",
-                output_dir.display()
-            );
-        } else {
-            return Err(e).with_context(|| {
-                format!(
-                    "directory durability sync failed on {}",
-                    output_dir.display()
-                )
-            });
-        }
-    }
+    sync_directory_entry(output_dir)?;
 
     // Record sidecar provenance manifest
     let manifest = UkiManifest::new(
@@ -275,7 +251,49 @@ pub fn prune_stale_ukis(
     Ok(removed)
 }
 
+/// Commits parent directory metadata to physical media.
+///
+/// On FAT32/vfat filesystems, `sync_all()` on directory descriptors may return
+/// `EINVAL`, `ENOTSUP`/`EOPNOTSUPP`, or `ENOSYS`. These are treated as non-fatal
+/// filesystem limitations, while true I/O errors (EIO, EPERM, EROFS, etc.) are propagated.
+pub fn sync_directory_entry(dir: &Path) -> Result<()> {
+    let dir_file = File::open(dir).with_context(|| {
+        format!(
+            "failed opening directory {} for durability sync",
+            dir.display()
+        )
+    })?;
+
+    if let Err(e) = dir_file.sync_all() {
+        let is_unsupported = e.kind() == std::io::ErrorKind::Unsupported
+            || e.raw_os_error() == Some(22)  // EINVAL
+            || e.raw_os_error() == Some(95)  // ENOTSUP / EOPNOTSUPP
+            || e.raw_os_error() == Some(38); // ENOSYS
+
+        if is_unsupported {
+            log::debug!(
+                "Directory sync not supported by filesystem at {}: {e}",
+                dir.display()
+            );
+        } else {
+            return Err(e)
+                .with_context(|| format!("directory durability sync failed on {}", dir.display()));
+        }
+    }
+
+    Ok(())
+}
+
 /// Restores the previous backup slot (.prev.efi) for a kernel.
+///
+/// Safety & durability guarantees:
+/// 1. Validates backup slot existence and reads metadata.
+/// 2. Stages rollback into a temporary sibling file (`.<target>.rollback.staging`)
+///    on the same filesystem so the recovery artifact is NEVER destroyed or truncated.
+/// 3. Ensures staging file bytes and metadata are committed to physical media via `sync_all()`.
+/// 4. Atomically renames staging file to final target slot.
+/// 5. Explicitly flushes directory metadata via `sync_directory_entry()`.
+/// 6. Preserves the backup slot intact so subsequent or repeated recovery attempts remain safe.
 pub fn rollback_kernel_uki(output_dir: &Path, kernel_version: &str) -> Result<PathBuf> {
     let target_uki = output_dir.join(format!("linux-{kernel_version}.efi"));
     let backup_uki = output_dir.join(format!("linux-{kernel_version}.prev.efi"));
@@ -300,32 +318,64 @@ pub fn rollback_kernel_uki(output_dir: &Path, kernel_version: &str) -> Result<Pa
     })?;
     let backup_len = backup_metadata.len();
 
-    // Atomically swap backup into active slot
-    let bytes_copied = fs::copy(&backup_uki, &target_uki).with_context(|| {
-        format!(
-            "failed restoring backup slot {} -> {}",
-            backup_uki.display(),
-            target_uki.display()
-        )
-    })?;
-
-    if bytes_copied != backup_len {
-        bail!("incomplete rollback copy: copied {bytes_copied} bytes, expected {backup_len} bytes");
+    // Stage rollback into a temporary sibling file on the same filesystem
+    // to prevent corrupting either the active slot or the backup slot if interrupted.
+    let staging_path = output_dir.join(format!(".linux-{kernel_version}.rollback.staging"));
+    if staging_path.exists() {
+        let _ = fs::remove_file(&staging_path);
     }
 
-    let t_file = File::open(&target_uki).with_context(|| {
-        format!(
-            "failed opening restored target {} for sync",
-            target_uki.display()
-        )
-    })?;
-    t_file
-        .sync_all()
-        .with_context(|| format!("fsync failed on restored target {}", target_uki.display()))?;
+    let rollback_op = (|| -> Result<()> {
+        let bytes_copied = fs::copy(&backup_uki, &staging_path).with_context(|| {
+            format!(
+                "failed copying backup slot {} -> rollback staging {}",
+                backup_uki.display(),
+                staging_path.display()
+            )
+        })?;
 
-    // Commit directory entry
-    if let Ok(dir_file) = File::open(output_dir) {
-        let _ = dir_file.sync_all();
+        if bytes_copied != backup_len {
+            bail!(
+                "incomplete rollback copy: copied {bytes_copied} bytes, expected {backup_len} bytes"
+            );
+        }
+
+        let stage_file = File::open(&staging_path).with_context(|| {
+            format!(
+                "failed opening staging file {} for sync",
+                staging_path.display()
+            )
+        })?;
+        stage_file.sync_all().with_context(|| {
+            format!(
+                "fsync failed on rollback staging {}",
+                staging_path.display()
+            )
+        })?;
+
+        fs::rename(&staging_path, &target_uki).with_context(|| {
+            format!(
+                "failed atomic rename from staging {} -> target {}",
+                staging_path.display(),
+                target_uki.display()
+            )
+        })?;
+
+        sync_directory_entry(output_dir).with_context(|| {
+            format!(
+                "failed committing directory metadata after rollback on {}",
+                output_dir.display()
+            )
+        })?;
+
+        Ok(())
+    })();
+
+    if let Err(err) = rollback_op {
+        if staging_path.exists() {
+            let _ = fs::remove_file(&staging_path);
+        }
+        return Err(err);
     }
 
     Ok(target_uki)

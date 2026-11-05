@@ -619,3 +619,180 @@ fn test_install_uki_backup_failure_preserves_existing_file() {
         "Original UKI was overwritten despite backup failure!"
     );
 }
+
+#[test]
+fn test_inspect_invalid_uki_artifact() {
+    let temp = TempDir::new().unwrap();
+    let truncated_path = temp.path().join("truncated.efi");
+    std::fs::write(&truncated_path, b"short").unwrap();
+
+    let err = rustyuki::build::inspect::inspect_pe_artifact(&truncated_path);
+    assert!(err.is_err());
+    assert!(err
+        .unwrap_err()
+        .to_string()
+        .contains("suspiciously small or empty"));
+
+    let non_pe_path = temp.path().join("invalid-header.efi");
+    std::fs::write(&non_pe_path, b"ELF-NOT-AN-EFI-BINARY-DATA-BYTES-LONG").unwrap();
+
+    let err2 = rustyuki::build::inspect::inspect_pe_artifact(&non_pe_path);
+    assert!(err2.is_err());
+    assert!(err2.unwrap_err().to_string().contains("expected MZ"));
+}
+
+#[test]
+fn test_rollback_repeated_recovery_safety() {
+    let temp = TempDir::new().unwrap();
+    let esp_out = temp.path().join("EFI/Linux");
+    std::fs::create_dir_all(&esp_out).unwrap();
+
+    let backup_path = esp_out.join("linux-6.17.4.prev.efi");
+    std::fs::write(&backup_path, b"BACKUP-SLOT-BYTES-RECOVERY-ARTIFACT").unwrap();
+
+    // Rollback attempt 1
+    let restored1 = rollback_kernel_uki(&esp_out, "6.17.4").unwrap();
+    assert_eq!(
+        std::fs::read(&restored1).unwrap(),
+        b"BACKUP-SLOT-BYTES-RECOVERY-ARTIFACT"
+    );
+
+    // Backup slot must still be intact and preserved!
+    assert!(
+        backup_path.exists(),
+        "Backup recovery artifact was destroyed by rollback!"
+    );
+    assert_eq!(
+        std::fs::read(&backup_path).unwrap(),
+        b"BACKUP-SLOT-BYTES-RECOVERY-ARTIFACT"
+    );
+
+    // Rollback attempt 2 (repeated recovery attempt must succeed)
+    let restored2 = rollback_kernel_uki(&esp_out, "6.17.4").unwrap();
+    assert_eq!(restored1, restored2);
+    assert_eq!(
+        std::fs::read(&restored2).unwrap(),
+        b"BACKUP-SLOT-BYTES-RECOVERY-ARTIFACT"
+    );
+}
+
+#[test]
+fn test_direct_backend_handles_registration_failure() {
+    let runner = TestMockRunner::new(vec![
+        MockCall {
+            program: "findmnt".to_string(),
+            args: vec![
+                "-n".to_string(),
+                "-o".to_string(),
+                "SOURCE".to_string(),
+                "/boot/efi".to_string(),
+            ],
+            output: Ok(ProcessOutput {
+                stdout: "/dev/nvme0n1p1\n".to_string(),
+                stderr: String::new(),
+            }),
+        },
+        MockCall {
+            program: "lsblk".to_string(),
+            args: vec![
+                "-no".to_string(),
+                "PKNAME".to_string(),
+                "/dev/nvme0n1p1".to_string(),
+            ],
+            output: Ok(ProcessOutput {
+                stdout: "nvme0n1\n".to_string(),
+                stderr: String::new(),
+            }),
+        },
+        MockCall {
+            program: "lsblk".to_string(),
+            args: vec![
+                "-no".to_string(),
+                "PARTNUM".to_string(),
+                "/dev/nvme0n1p1".to_string(),
+            ],
+            output: Ok(ProcessOutput {
+                stdout: "1\n".to_string(),
+                stderr: String::new(),
+            }),
+        },
+        MockCall {
+            program: "efibootmgr".to_string(),
+            args: vec!["--verbose".to_string()],
+            output: Ok(ProcessOutput {
+                stdout: "BootCurrent: 0001\nBootOrder: 0001\nBoot0001* Fedora\tHD(...)\n"
+                    .to_string(),
+                stderr: String::new(),
+            }),
+        },
+        MockCall {
+            program: "efibootmgr".to_string(),
+            args: vec![
+                "--quiet".to_string(),
+                "--create".to_string(),
+                "--create-only".to_string(),
+                "--disk".to_string(),
+                "/dev/nvme0n1".to_string(),
+                "--part".to_string(),
+                "1".to_string(),
+                "--label".to_string(),
+                "Linux UKI 6.17.4-test".to_string(),
+                "--loader".to_string(),
+                r"\EFI\Linux\linux-6.17.4-test.efi".to_string(),
+            ],
+            output: Err(anyhow::anyhow!("NVRAM full: no space left on device")),
+        },
+    ]);
+
+    let backend = DirectUefiBackend;
+    let installed = InstalledUki {
+        kernel_version: "6.17.4-test".to_string(),
+        path: PathBuf::from("/boot/efi/EFI/Linux/linux-6.17.4-test.efi"),
+        manifest_path: PathBuf::from("/boot/efi/EFI/Linux/linux-6.17.4-test.efi.manifest.json"),
+        manifest: None,
+        has_backup_slot: false,
+        backup_slot_path: PathBuf::from("/boot/efi/EFI/Linux/linux-6.17.4-test.prev.efi"),
+    };
+
+    let err = backend.activate(&runner, &installed, Path::new("/boot/efi"), false, false);
+    assert!(err.is_err());
+    assert!(err.unwrap_err().to_string().contains("NVRAM full"));
+    runner.assert_complete();
+}
+
+#[test]
+fn test_systemd_boot_activate_handles_set_default_failure() {
+    let runner = TestMockRunner::new(vec![
+        MockCall {
+            program: "bootctl".to_string(),
+            args: vec!["update".to_string()],
+            output: Ok(ProcessOutput::default()),
+        },
+        MockCall {
+            program: "bootctl".to_string(),
+            args: vec![
+                "set-default".to_string(),
+                "linux-6.17.4-test.efi".to_string(),
+            ],
+            output: Err(anyhow::anyhow!("Failed to set default: I/O error")),
+        },
+    ]);
+
+    let backend = SystemdBootBackend;
+    let installed = InstalledUki {
+        kernel_version: "6.17.4-test".to_string(),
+        path: PathBuf::from("/boot/efi/EFI/Linux/linux-6.17.4-test.efi"),
+        manifest_path: PathBuf::from("/boot/efi/EFI/Linux/linux-6.17.4-test.efi.manifest.json"),
+        manifest: None,
+        has_backup_slot: false,
+        backup_slot_path: PathBuf::from("/boot/efi/EFI/Linux/linux-6.17.4-test.prev.efi"),
+    };
+
+    let err = backend.activate(&runner, &installed, Path::new("/boot/efi"), false, false);
+    assert!(err.is_err());
+    assert!(err
+        .unwrap_err()
+        .to_string()
+        .contains("failed setting default boot entry"));
+    runner.assert_complete();
+}
