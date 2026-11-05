@@ -143,7 +143,7 @@ Regardless of source, parameters that are irrelevant or problematic for UKIs are
 - `rd.driver.blacklist=...`
 
 ### 2. Major Version Invalidation
-Cached parameters are stored in `/var/lib/uki-build/cmdline/effective-cmdline` alongside `/var/lib/uki-build/cmdline/version-id`. When upgrading Fedora releases (e.g. Fedora 41 $\rightarrow$ Fedora 42), the cache is automatically invalidated to discover updated distribution parameters.
+Cached parameters are stored in `/var/lib/uki-build/cmdline/effective-cmdline` alongside `/var/lib/uki-build/cmdline/version-id`. When upgrading Fedora releases (e.g. Fedora 44 $\rightarrow$ Fedora 45), the cache is automatically invalidated to discover updated distribution parameters.
 
 ### 3. Safety Validations
 - **Placeholder Rejection**: If the command line contains `root=UUID=REPLACE-ME`, the build is aborted immediately.

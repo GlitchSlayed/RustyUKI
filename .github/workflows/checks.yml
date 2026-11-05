@@ -10,9 +10,13 @@ env:
 jobs:
   fedora-checks:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        fedora_version: ['44', '45']
     container:
-      # Keep this pinned to a stable Fedora release so CI remains reproducible.
-      image: fedora:41
+      # Targets latest 2 Fedora releases
+      image: fedora:${{ matrix.fedora_version }}
     steps:
       - uses: actions/checkout@v5
 

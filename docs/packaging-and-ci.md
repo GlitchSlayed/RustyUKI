@@ -72,12 +72,12 @@ ls -l ~/rpmbuild/SRPMS/*.rpm
 
 ## Continuous Integration (`checks.yml`)
 
-The repository runs continuous validation on every push and pull request via [`.github/workflows/checks.yml`](../.github/workflows/checks.yml):
+The repository runs continuous validation across a matrix of the latest two Fedora releases (**Fedora 44** and **Fedora 45**) on every push and pull request via [`.github/workflows/checks.yml`](../.github/workflows/checks.yml):
 
 ```mermaid
 flowchart LR
-    PushOrPR["Git Push / PR"] --> Container["Fedora 41 Container"]
-    Container --> Fmt["cargo fmt --all --check"]
+    PushOrPR["Git Push / PR"] --> Matrix["Matrix Strategy:<br/>Fedora 44 & Fedora 45 Containers"]
+    Matrix --> Fmt["cargo fmt --all --check"]
     Fmt --> Tests["cargo test --all-targets --locked"]
     Tests --> Clippy["cargo clippy --all-targets -- -D warnings"]
     Clippy --> Check["cargo check --all-targets --locked"]
@@ -85,6 +85,7 @@ flowchart LR
 ```
 
 ### Features Verified:
+- **Matrix Testing**: Validates code and dependencies against Fedora 44 (`fedora:44`) and Fedora 45 (`fedora:45`).
 - **Rustfmt Compliance**: Ensures consistent formatting across all modules and tests.
 - **Unit and Integration Tests**: Runs tests in [`tests/integration_cli.rs`](../tests/integration_cli.rs) using mocked system calls (`MockRunner`).
 - **Strict Clippy**: Enforces `-D warnings` across all code.
@@ -94,17 +95,18 @@ flowchart LR
 
 ## Automated Nightly RPM Releases (`rpm.yml`)
 
-The workflow in [`.github/workflows/rpm.yml`](../.github/workflows/rpm.yml) handles two jobs:
+The workflow in [`.github/workflows/rpm.yml`](../.github/workflows/rpm.yml) handles dual-target automated packaging:
 
 ### 1. `rpm-ci` (On Pull Requests and Pushes)
-- Spins up a container based on `fedora:41`.
-- Packages the source tarball and builds binary and source RPMs (`.rpm` and `.src.rpm`).
-- Uploads the resulting RPMs as workflow artifacts for testing without creating releases.
+- Spins up containers across a matrix for both `fedora:44` and `fedora:45`.
+- Packages the source tarball and builds binary and source RPMs (`.fc44` and `.fc45`).
+- Uploads the resulting RPMs as separate workflow artifacts for testing without creating releases.
 
-### 2. `rpm-release` (Scheduled / Manual Dispatch)
+### 2. `plan-release`, `build-release-rpms`, and `publish-release` (Scheduled / Manual Dispatch)
 - Runs daily at `03:17 UTC` and on `workflow_dispatch`.
 - Inspects the latest `rpm-nightly-*` release tag against `HEAD`.
 - If new commits were added (or if forced via manual dispatch):
-  1. Builds clean binary and source RPMs.
-  2. Creates a GitHub Release tagged `rpm-nightly-YYYYMMDD`.
-  3. Uploads the built `.rpm` and `.src.rpm` files as release assets.
+  1. Concurrently builds clean binary and source RPMs on both **Fedora 44** and **Fedora 45** containers.
+  2. Aggregates all RPM packages (`.fc44.x86_64.rpm`, `.fc44.src.rpm`, `.fc45.x86_64.rpm`, `.fc45.src.rpm`).
+  3. Creates a single consolidated GitHub Release tagged `rpm-nightly-YYYYMMDD`.
+  4. Publishes all built `.rpm` and `.src.rpm` files as release assets.

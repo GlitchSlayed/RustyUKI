@@ -106,14 +106,16 @@ mount | grep -i efi
 
 ## Installation
 
-### Option 1 — Install via automated nightly RPM (Recommended for Fedora)
+### Option 1 — Install via automated nightly RPM (Recommended for Fedora 44 & 45)
 
-Automated nightly RPM builds are published via GitHub Releases on every update:
+Automated nightly RPM builds for the latest Fedora releases (**Fedora 44** and **Fedora 45**) are published via GitHub Releases on every update:
 
 ```bash
-# Download the latest RPM from GitHub Releases:
+# Download the latest RPM from GitHub Releases for your Fedora release:
 # https://github.com/GlitchSlayed/RustyUKI/releases
-sudo dnf install https://github.com/GlitchSlayed/RustyUKI/releases/download/rpm-nightly-YYYYMMDD/rustyuki-0.2.0-1.fc41.x86_64.rpm
+sudo dnf install https://github.com/GlitchSlayed/RustyUKI/releases/download/rpm-nightly-YYYYMMDD/rustyuki-0.2.0-1.fc45.x86_64.rpm
+# or for Fedora 44:
+# sudo dnf install https://github.com/GlitchSlayed/RustyUKI/releases/download/rpm-nightly-YYYYMMDD/rustyuki-0.2.0-1.fc44.x86_64.rpm
 ```
 
 ### Option 2 — Build from source
@@ -253,7 +255,7 @@ Use `--boot-once` when you want firmware to trial the new UKI exactly once via `
 
 ```bash
 sudo rustyuki install
-sudo rustyuki install --kernel-version "6.12.0-200.fc41.x86_64"
+sudo rustyuki install --kernel-version "6.17.4-100.fc44.x86_64"
 ```
 
 Use `generate --boot-once` if you want one-time trial semantics without running `bootctl update`.

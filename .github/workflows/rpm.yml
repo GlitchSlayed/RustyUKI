@@ -26,8 +26,12 @@ jobs:
   rpm-ci:
     if: github.event_name == 'push' || github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        fedora_version: ['44', '45']
     container:
-      image: fedora:41
+      image: fedora:${{ matrix.fedora_version }}
 
     steps:
       - name: Install build dependencies
@@ -38,7 +42,7 @@ jobs:
             rpm-build \
             rpmdevtools \
             cargo \
-            rust \
+            rust
 
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -71,36 +75,24 @@ jobs:
       - name: Upload RPM artifacts
         uses: actions/upload-artifact@v5
         with:
-          name: fedora-rpm-ci-${{ github.run_number }}
+          name: fedora-${{ matrix.fedora_version }}-rpm-ci-${{ github.run_number }}
           path: dist/*
           if-no-files-found: error
 
-  rpm-release:
+  plan-release:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    container:
-      image: fedora:41
-
+    outputs:
+      should_build: ${{ steps.plan.outputs.should_build }}
+      head_sha: ${{ steps.plan.outputs.head_sha }}
+      reason: ${{ steps.plan.outputs.reason }}
+      release_tag: ${{ steps.plan.outputs.release_tag }}
+      latest_tag: ${{ steps.plan.outputs.latest_tag }}
     steps:
-      - name: Install build dependencies
-        run: |
-          dnf -y update
-          dnf -y install \
-            git \
-            rpm-build \
-            rpmdevtools \
-            cargo \
-            rust \
-            gh \
-            jq
-
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
           fetch-depth: 0
-
-      - name: Mark workspace as a safe Git directory
-        run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
 
       - name: Decide whether a build is needed
         id: plan
@@ -145,13 +137,37 @@ jobs:
 
           echo "Build decision: ${should_build} (${reason})"
 
-      - name: Stop early when there are no new commits
-        if: steps.plan.outputs.should_build != 'true'
+  build-release-rpms:
+    needs: plan-release
+    if: needs.plan-release.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        fedora_version: ['44', '45']
+    container:
+      image: fedora:${{ matrix.fedora_version }}
+
+    steps:
+      - name: Install build dependencies
         run: |
-          echo "Skipping build: ${{ steps.plan.outputs.reason }}"
+          dnf -y update
+          dnf -y install \
+            git \
+            rpm-build \
+            rpmdevtools \
+            cargo \
+            rust
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.plan-release.outputs.head_sha }}
+
+      - name: Mark workspace as a safe Git directory
+        run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
 
       - name: Build SRPM/RPM using Fedora rpm macros
-        if: steps.plan.outputs.should_build == 'true'
         run: |
           set -euo pipefail
 
@@ -175,26 +191,42 @@ jobs:
           find "${topdir}/SRPMS" -type f -name '*.src.rpm' -exec cp {} dist/ \;
 
       - name: Upload RPM artifacts
-        if: steps.plan.outputs.should_build == 'true'
         uses: actions/upload-artifact@v5
         with:
-          name: fedora-rpm-${{ steps.plan.outputs.release_tag }}
+          name: fedora-${{ matrix.fedora_version }}-rpm-${{ needs.plan-release.outputs.release_tag }}
           path: dist/*
           if-no-files-found: error
 
+  publish-release:
+    needs: [plan-release, build-release-rpms]
+    if: needs.plan-release.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all built RPM artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: dist-all
+          merge-multiple: true
+
+      - name: List downloaded packages
+        run: ls -la dist-all/
+
       - name: Create GitHub release for RPMs
-        if: steps.plan.outputs.should_build == 'true'
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.plan.outputs.release_tag }}
-          target_commitish: ${{ steps.plan.outputs.head_sha }}
-          name: Fedora RPM build ${{ steps.plan.outputs.release_tag }}
+          tag_name: ${{ needs.plan-release.outputs.release_tag }}
+          target_commitish: ${{ needs.plan-release.outputs.head_sha }}
+          name: Fedora RPM build ${{ needs.plan-release.outputs.release_tag }}
           generate_release_notes: true
-          files: dist/*
+          files: dist-all/*
           body: |
-            Automated Fedora RPM build.
+            Automated Fedora RPM build targeting Fedora 44 and Fedora 45.
 
             - Trigger: `${{ github.event_name }}`
-            - Reason: `${{ steps.plan.outputs.reason }}`
-            - Commit: `${{ steps.plan.outputs.head_sha }}`
-            - Previous RPM tag: `${{ steps.plan.outputs.latest_tag || 'none' }}`
+            - Reason: `${{ needs.plan-release.outputs.reason }}`
+            - Commit: `${{ needs.plan-release.outputs.head_sha }}`
+            - Previous RPM tag: `${{ needs.plan-release.outputs.latest_tag || 'none' }}`
+            - Target Releases: Fedora 44 (`.fc44`), Fedora 45 (`.fc45`)

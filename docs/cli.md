@@ -50,7 +50,7 @@ sudo rustyuki status
 
 **Example Output:**
 ```text
-kernel: 6.12.8-200.fc41.x86_64
+kernel: 6.17.4-100.fc44.x86_64
 esp_path: /boot/efi
 output_dir: /boot/efi/EFI/Linux
 cmdline_file: /etc/kernel/cmdline
@@ -97,7 +97,7 @@ sudo rustyuki generate
 sudo rustyuki generate --dry-run
 
 # Build a specific installed kernel
-sudo rustyuki generate --kernel-version 6.12.8-200.fc41.x86_64
+sudo rustyuki generate --kernel-version 6.17.4-100.fc44.x86_64
 
 # Build and schedule for a single trial boot
 sudo rustyuki generate --boot-once
