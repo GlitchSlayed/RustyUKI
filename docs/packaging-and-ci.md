@@ -131,11 +131,16 @@ flowchart LR
 
 ---
 
-## Automated RPM CI & Smoke Tests (`rpm.yml`)
+## Automated RPM CI, Smoke Tests & Nightly Releases (`rpm.yml`)
 
-The workflow in [`.github/workflows/rpm.yml`](../.github/workflows/rpm.yml) builds the RPM package across Fedora 44 and Fedora 45, followed by an immediate installation smoke test:
-1. `dnf install -y dist/rustyuki-*.x86_64.rpm`
-2. `rustyuki --version`
-3. Verifies proper installation of `/usr/lib/kernel/install.d/90-rustyuki.install`
-4. Verifies `/etc/rustyuki/config.toml`
-5. Verifies `/usr/lib/systemd/system/rustyuki-boot-confirm.service`
+The workflow in [`.github/workflows/rpm.yml`](../.github/workflows/rpm.yml) validates and builds the RPM package across Fedora 44 and Fedora 45:
+1. **Pull Requests (`rpm-ci`)**: Automatically builds SRPMs and binary RPMs in clean Fedora 44 & 45 containers, followed by an immediate installation smoke test:
+   - `dnf install -y dist/rustyuki-*.x86_64.rpm`
+   - `rustyuki --version`
+   - Verifies `/usr/lib/kernel/install.d/90-rustyuki.install`
+   - Verifies `/etc/rustyuki/config.toml`
+   - Verifies `/usr/lib/systemd/system/rustyuki-boot-confirm.service`
+2. **Each Commit & Scheduled Releases (`plan-release` -> `build-release-rpms` -> `publish-release`)**:
+   - On every commit push to `main` (as well as nightly schedule and manual dispatch), the pipeline builds binary RPMs and SRPMs targeting Fedora 44 and Fedora 45.
+   - Runs full package installation and smoke tests.
+   - Automatically publishes a GitHub Release tagged `rpm-nightly-YYYYMMDD-<short-sha>` with all built `.rpm` and `.src.rpm` artifacts attached.

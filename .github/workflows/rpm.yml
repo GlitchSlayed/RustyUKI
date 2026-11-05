@@ -24,7 +24,7 @@ env:
 
 jobs:
   rpm-ci:
-    if: github.event_name == 'push' || github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -89,7 +89,7 @@ jobs:
           if-no-files-found: error
 
   plan-release:
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     outputs:
       should_build: ${{ steps.plan.outputs.should_build }}
@@ -112,21 +112,25 @@ jobs:
         run: |
           set -euo pipefail
 
-          latest_tag="$(gh api repos/${GITHUB_REPOSITORY}/releases --jq '[.[] | select(.tag_name | startswith("rpm-nightly-"))][0].tag_name' || true)"
+          latest_tag="$(gh api repos/${GITHUB_REPOSITORY}/releases --jq '[.[] | select(.tag_name | startswith("rpm-nightly-"))][0].tag_name' 2>/dev/null || true)"
           head_sha="$(git rev-parse HEAD)"
+          short_sha="$(git rev-parse --short=8 HEAD)"
 
           should_build=false
           reason=""
 
-          if [[ "${EVENT_NAME}" == "workflow_dispatch" && "${FORCE_BUILD}" == "true" ]]; then
+          if [[ "${EVENT_NAME}" == "push" ]]; then
+            should_build=true
+            reason="new commit ${short_sha} pushed to ${GITHUB_REF_NAME}"
+          elif [[ "${EVENT_NAME}" == "workflow_dispatch" && "${FORCE_BUILD}" == "true" ]]; then
             should_build=true
             reason="manual force build"
           elif [[ -z "${latest_tag}" || "${latest_tag}" == "null" ]]; then
             should_build=true
             reason="no previous rpm-nightly release"
           else
-            last_sha="$(git rev-list -n 1 "${latest_tag}")"
-            if [[ "${head_sha}" != "${last_sha}" ]]; then
+            last_sha="$(git rev-list -n 1 "${latest_tag}" 2>/dev/null || true)"
+            if [[ -z "${last_sha}" || "${head_sha}" != "${last_sha}" ]]; then
               should_build=true
               reason="new commits since ${latest_tag}"
             else
@@ -134,7 +138,7 @@ jobs:
             fi
           fi
 
-          release_tag="rpm-nightly-$(date -u +%Y%m%d)"
+          release_tag="rpm-nightly-$(date -u +%Y%m%d)-${short_sha}"
 
           {
             echo "latest_tag=${latest_tag}"
@@ -145,6 +149,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
           echo "Build decision: ${should_build} (${reason})"
+          echo "Target release tag: ${release_tag}"
 
   build-release-rpms:
     needs: plan-release
@@ -234,14 +239,17 @@ jobs:
 
       - name: Create GitHub release for RPMs
         uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ needs.plan-release.outputs.release_tag }}
           target_commitish: ${{ needs.plan-release.outputs.head_sha }}
           name: Fedora RPM build ${{ needs.plan-release.outputs.release_tag }}
           generate_release_notes: true
+          make_latest: true
           files: dist-all/*
           body: |
-            Automated Fedora RPM build targeting Fedora 44 and Fedora 45.
+            Automated Fedora RPM nightly build targeting Fedora 44 and Fedora 45.
 
             - Trigger: `${{ github.event_name }}`
             - Reason: `${{ needs.plan-release.outputs.reason }}`
