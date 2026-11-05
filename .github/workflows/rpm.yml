@@ -42,7 +42,8 @@ jobs:
             rpm-build \
             rpmdevtools \
             cargo \
-            rust
+            rust \
+            systemd-rpm-macros
 
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -71,6 +72,14 @@ jobs:
           mkdir -p dist
           find "${topdir}/RPMS" -type f -name '*.rpm' -exec cp {} dist/ \;
           find "${topdir}/SRPMS" -type f -name '*.src.rpm' -exec cp {} dist/ \;
+
+      - name: Smoke test installed RPM
+        run: |
+          dnf install -y dist/rustyuki-*.x86_64.rpm
+          rustyuki --version
+          test -f /usr/lib/kernel/install.d/90-rustyuki.install
+          test -f /etc/rustyuki/config.toml
+          test -f /usr/lib/systemd/system/rustyuki-boot-confirm.service
 
       - name: Upload RPM artifacts
         uses: actions/upload-artifact@v5
@@ -157,7 +166,8 @@ jobs:
             rpm-build \
             rpmdevtools \
             cargo \
-            rust
+            rust \
+            systemd-rpm-macros
 
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -189,6 +199,14 @@ jobs:
           mkdir -p dist
           find "${topdir}/RPMS" -type f -name '*.rpm' -exec cp {} dist/ \;
           find "${topdir}/SRPMS" -type f -name '*.src.rpm' -exec cp {} dist/ \;
+
+      - name: Smoke test installed RPM
+        run: |
+          dnf install -y dist/rustyuki-*.x86_64.rpm
+          rustyuki --version
+          test -f /usr/lib/kernel/install.d/90-rustyuki.install
+          test -f /etc/rustyuki/config.toml
+          test -f /usr/lib/systemd/system/rustyuki-boot-confirm.service
 
       - name: Upload RPM artifacts
         uses: actions/upload-artifact@v5

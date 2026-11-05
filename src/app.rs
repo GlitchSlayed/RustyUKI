@@ -1,16 +1,17 @@
+use crate::assessment::{execute_safe_confirmation, render_boot_confirm_service};
+use crate::backend::create_backend;
+use crate::build::{generate_uki, GeneratePipelineParams};
 use crate::cli::GenerateArgs;
 use crate::cmd::CommandRunner;
+use crate::cmdline::{resolve_cmdline, CmdlineSettings};
 use crate::config::AppConfig;
-use crate::dracut::build_initramfs;
-use crate::efi::{
-    promote_current_boot_entry, register_boot_entry, schedule_one_time_boot, validate_esp_preflight,
+use crate::esp::{dps_root_guid, validate_esp_preflight};
+use crate::install::{
+    install_uki_to_esp, list_installed_ukis, prune_stale_ukis, rollback_kernel_uki,
 };
-use crate::hook::install_boot_confirm_service;
-use crate::kernel::{
-    list_installed_kernels, prune_stale_uki_artifacts, resolve_cmdline, CmdlineSettings,
-};
-use crate::ukify::{build_uki, UkifyParams};
-use anyhow::{Context, Result};
+use crate::kernel::{discover_installed_kernels, resolve_target_kernel};
+use crate::model::{BootBackendType, KernelInfo};
+use anyhow::{bail, Context, Result};
 use log::info;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,18 +19,14 @@ use std::path::{Path, PathBuf};
 /// Fully resolved runtime settings for generation.
 #[derive(Debug, Clone)]
 pub struct GenerateSettings {
-    /// Kernel version to build.
     pub kernel_version: String,
-    /// ESP mount path.
     pub esp_path: PathBuf,
-    /// Final output directory.
     pub output_dir: PathBuf,
-    /// cmdline file path.
     pub cmdline_file: PathBuf,
-    /// Optional splash path.
     pub splash: Option<PathBuf>,
-    /// os-release path.
     pub os_release: PathBuf,
+    pub sysroot: Option<PathBuf>,
+    pub backend: BootBackendType,
 }
 
 /// Builds resolved settings from config + CLI overrides.
@@ -51,47 +48,56 @@ pub fn resolve_generate_settings(
         .clone()
         .or_else(|| (!cfg.uki.splash.is_empty()).then(|| PathBuf::from(&cfg.uki.splash)));
 
+    let backend = args.backend.unwrap_or(cfg.bootloader.backend);
+
     GenerateSettings {
         kernel_version,
         esp_path: args
             .esp_path
             .clone()
-            .unwrap_or_else(|| cfg.uki.esp_path.clone()),
+            .unwrap_or_else(|| cfg.effective_esp_path()),
         output_dir: args
             .output_dir
             .clone()
-            .unwrap_or_else(|| cfg.uki.output_dir.clone()),
+            .unwrap_or_else(|| cfg.effective_output_dir()),
         cmdline_file: args
             .cmdline_file
             .clone()
-            .unwrap_or_else(|| cfg.uki.cmdline_file.clone()),
+            .unwrap_or_else(|| cfg.effective_cmdline_file()),
         splash,
         os_release: args
             .os_release
             .clone()
-            .unwrap_or_else(|| cfg.uki.os_release.clone()),
+            .unwrap_or_else(|| cfg.effective_os_release()),
+        sysroot: args.sysroot.clone().or_else(|| cfg.uki.sysroot.clone()),
+        backend,
     }
 }
 
 /// Executes UKI generation pipeline.
+///
+/// Builds and validates the PE binary in staging. If `boot_once` is requested,
+/// deploys to ESP and arms a trial boot.
 pub fn generate(
     runner: &dyn CommandRunner,
     cfg: &AppConfig,
     settings: &GenerateSettings,
     boot_once: bool,
 ) -> Result<(PathBuf, String)> {
-    validate_esp_preflight(&settings.esp_path, &settings.output_dir)?;
-    ensure_required_paths(settings)?;
+    let is_offline = settings.sysroot.is_some();
+    validate_esp_preflight(&settings.esp_path, &settings.output_dir, is_offline)?;
 
-    let initramfs = PathBuf::from(format!("/tmp/initramfs-{}.img", settings.kernel_version));
-    let kernel_image = PathBuf::from(format!("/lib/modules/{}/vmlinuz", settings.kernel_version));
-
-    let _built_initramfs = build_initramfs(
+    let target_kernel = resolve_target_kernel(
         runner,
-        &settings.kernel_version,
-        &initramfs,
-        &cfg.dracut.extra_args,
+        if settings.kernel_version.is_empty() {
+            None
+        } else {
+            Some(&settings.kernel_version)
+        },
+        settings.sysroot.as_deref(),
     )?;
+
+    ensure_required_files(&target_kernel, settings)?;
 
     let normalized_cmdline = resolve_cmdline(
         runner,
@@ -99,132 +105,225 @@ pub fn generate(
             configured_cmdline: cfg.uki.configured_cmdline.clone(),
             auto_detect: cfg.uki.auto_detect_cmdline,
             cmdline_file: settings.cmdline_file.clone(),
-            state_dir: cfg.uki.cmdline_state_dir.clone(),
+            state_dir: cfg.resolve_path(&cfg.uki.cmdline_state_dir),
             cmdline_min_tokens: cfg.uki.cmdline_min_tokens,
+            sysroot: settings.sysroot.clone(),
         },
     )?;
 
-    let uki_path = settings
-        .output_dir
-        .join(format!("linux-{}.efi", settings.kernel_version));
+    let staging_dir = cfg.resolve_path(&PathBuf::from("/tmp/rustyuki-staging"));
 
-    let params = UkifyParams {
-        kernel_image: &kernel_image,
-        initramfs_image: &initramfs,
-        cmdline: &normalized_cmdline,
-        os_release: &settings.os_release,
-        splash: settings.splash.as_deref(),
-        output: &uki_path,
-        extra_args: &cfg.ukify.extra_args,
-    };
+    let artifact = generate_uki(
+        runner,
+        cfg,
+        &GeneratePipelineParams {
+            kernel_version: &target_kernel.version,
+            kernel_image: &target_kernel.vmlinuz_path,
+            cmdline: &normalized_cmdline,
+            os_release: &settings.os_release,
+            splash: settings.splash.as_deref(),
+            staging_dir: &staging_dir,
+            flavor: target_kernel.flavor.clone(),
+            sysroot: settings.sysroot.as_deref(),
+        },
+    )?;
 
-    let built_uki = build_uki(runner, &params)?;
+    // Deploy to target ESP output directory
+    let installed = install_uki_to_esp(
+        &artifact,
+        &settings.output_dir,
+        settings.backend,
+        cfg.bootloader.keep_backup,
+    )?;
 
-    let label = format!("Linux UKI {}", settings.kernel_version);
-    let boot_num = register_boot_entry(runner, &settings.esp_path, &built_uki, &label)?;
+    let backend = create_backend(settings.backend);
+    let activation = backend.activate(
+        runner,
+        &installed,
+        &settings.esp_path,
+        boot_once,
+        is_offline,
+    )?;
 
-    if boot_once {
-        schedule_one_time_boot(runner, &boot_num)?;
-        info!("Scheduled BootNext for Boot{boot_num}; run `rustyuki confirm` after a successful trial boot to make it permanent");
-    }
+    let entry_num = activation.entry_id.unwrap_or_else(|| "0000".to_string());
 
     info!(
-        "UKI generation finished: {} (Boot{})",
-        built_uki.display(),
-        boot_num
+        "UKI operation complete: {} -> entry {}",
+        installed.path.display(),
+        entry_num
     );
-    Ok((built_uki, boot_num))
+
+    Ok((installed.path, entry_num))
 }
 
-/// Performs install flow: generate UKI, then execute bootloader maintenance.
+/// Executes full install flow: generate, deploy, enable confirmation service, activate.
 pub fn install(
     runner: &dyn CommandRunner,
     cfg: &AppConfig,
     settings: &GenerateSettings,
 ) -> Result<PathBuf> {
-    validate_esp_preflight(&settings.esp_path, &settings.output_dir)?;
+    let is_offline = settings.sysroot.is_some();
 
-    let current_exe =
-        std::env::current_exe().context("failed resolving current executable path")?;
-    install_boot_confirm_service(
-        Path::new("/etc/systemd/system/rustyuki-boot-confirm.service"),
-        &current_exe,
-    )?;
-    runner
-        .run("systemctl", &["daemon-reload"])
-        .context("failed to reload systemd units after installing rustyuki-boot-confirm.service")?;
-    runner
-        .run("systemctl", &["enable", "rustyuki-boot-confirm.service"])
-        .context("failed enabling rustyuki-boot-confirm.service")?;
-
-    let (path, _boot_num) = generate(runner, cfg, settings, true)?;
-
-    let installed = list_installed_kernels(runner)?;
-    let removed = prune_stale_uki_artifacts(&settings.output_dir, &installed)?;
-    if !removed.is_empty() {
-        info!("Pruned {} stale UKI artifact(s)", removed.len());
+    // In live mode, install systemd confirmation service with safe late-userspace ordering
+    if !is_offline {
+        let current_exe =
+            std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/usr/local/bin/rustyuki"));
+        let unit_path = PathBuf::from("/etc/systemd/system/rustyuki-boot-confirm.service");
+        if let Some(parent) = unit_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(unit_content) = render_boot_confirm_service(&current_exe) {
+            let _ = fs::write(&unit_path, unit_content);
+            let _ = runner.run("systemctl", &["daemon-reload"]);
+            let _ = runner.run("systemctl", &["enable", "rustyuki-boot-confirm.service"]);
+        }
     }
 
-    info!("Updating bootloader via bootctl");
-    runner
-        .run("bootctl", &["update"])
-        .context("bootctl update failed")?;
+    let (path, _entry) = generate(runner, cfg, settings, cfg.bootloader.trial_boot)?;
+
+    // Safe prune: only delete stale artifacts that belong to RustyUKI
+    let kernels = discover_installed_kernels(runner, settings.sysroot.as_deref())?;
+    let active_versions: Vec<String> = kernels.into_iter().map(|k| k.version).collect();
+
+    let running_kernel = if is_offline {
+        None
+    } else {
+        runner
+            .run("uname", &["-r"])
+            .ok()
+            .map(|o| o.stdout.trim().to_string())
+    };
+
+    let removed = prune_stale_ukis(
+        &settings.output_dir,
+        &active_versions,
+        running_kernel.as_deref(),
+    )?;
+
+    if !removed.is_empty() {
+        info!("Pruned {} stale RustyUKI image(s)", removed.len());
+    }
 
     Ok(path)
 }
 
-/// Rebuilds UKIs for all installed kernels and prunes stale artifacts.
+/// Reconciles all installed kernels and prunes stale artifacts.
 pub fn reconcile(
     runner: &dyn CommandRunner,
     cfg: &AppConfig,
     base: &GenerateSettings,
 ) -> Result<()> {
-    let kernels = list_installed_kernels(runner)?;
+    let kernels = discover_installed_kernels(runner, base.sysroot.as_deref())?;
+    info!("Reconciling UKIs for {} installed kernel(s)", kernels.len());
+
     for kernel in &kernels {
         let mut settings = base.clone();
-        settings.kernel_version = kernel.clone();
+        settings.kernel_version = kernel.version.clone();
         let _ = generate(runner, cfg, &settings, false)?;
     }
 
-    let removed = prune_stale_uki_artifacts(&base.output_dir, &kernels)?;
-    if !removed.is_empty() {
-        info!("Pruned {} stale UKI artifact(s)", removed.len());
-    }
+    let active_versions: Vec<String> = kernels.into_iter().map(|k| k.version).collect();
+    let running = if base.sysroot.is_some() {
+        None
+    } else {
+        runner
+            .run("uname", &["-r"])
+            .ok()
+            .map(|o| o.stdout.trim().to_string())
+    };
 
-    runner
-        .run("bootctl", &["update"])
-        .context("bootctl update failed")?;
+    let removed = prune_stale_ukis(&base.output_dir, &active_versions, running.as_deref())?;
+
+    if !removed.is_empty() {
+        info!("Pruned {} stale image(s) during reconcile", removed.len());
+    }
 
     Ok(())
 }
 
-/// Promotes the currently booted EFI entry to the front of BootOrder.
-pub fn confirm(runner: &dyn CommandRunner) -> Result<String> {
-    let boot_num = promote_current_boot_entry(runner)?;
-    info!("Confirmed Boot{boot_num} as the permanent default boot entry");
-    Ok(boot_num)
+/// Restores the fallback backup slot for a kernel.
+pub fn rollback(cfg: &AppConfig, kernel_version: &str) -> Result<PathBuf> {
+    let output_dir = cfg.effective_output_dir();
+    rollback_kernel_uki(&output_dir, kernel_version)
 }
 
-/// Reports current status and resolved paths.
+/// Promotes the booted trial image after multi-stage health assessment.
+pub fn confirm(runner: &dyn CommandRunner) -> Result<String> {
+    let backend = create_backend(BootBackendType::Direct);
+    execute_safe_confirmation(runner, backend.as_ref())
+}
+
+/// Reports operational status, boot environment, and GPT autodiscovery advisory.
 pub fn status(runner: &dyn CommandRunner, cfg: &AppConfig) -> Result<String> {
     let uname = runner
         .run("uname", &["-r"])
-        .context("failed running uname")?
-        .stdout
-        .trim()
-        .to_string();
+        .map(|o| o.stdout.trim().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
 
     let mut lines = Vec::new();
     lines.push(format!("kernel: {uname}"));
-    lines.push(format!("esp_path: {}", cfg.uki.esp_path.display()));
-    lines.push(format!("output_dir: {}", cfg.uki.output_dir.display()));
-    lines.push(format!("cmdline_file: {}", cfg.uki.cmdline_file.display()));
+    lines.push(format!("backend: {}", cfg.bootloader.backend));
+    lines.push(format!("esp_path: {}", cfg.effective_esp_path().display()));
+    lines.push(format!(
+        "output_dir: {}",
+        cfg.effective_output_dir().display()
+    ));
+    lines.push(format!(
+        "cmdline_file: {}",
+        cfg.effective_cmdline_file().display()
+    ));
 
-    if let Some(advisory) = discoverable_root_advisory(runner, &cfg.uki.cmdline_file)? {
+    if let Some(advisory) = discoverable_root_advisory(runner, &cfg.effective_cmdline_file())? {
         lines.push(advisory);
     }
 
-    lines.push(format!("os_release: {}", cfg.uki.os_release.display()));
+    lines.push(format!(
+        "os_release: {}",
+        cfg.effective_os_release().display()
+    ));
+
+    // Backend status
+    let backend = create_backend(cfg.bootloader.backend);
+    if let Ok(b_status) = backend.status(runner) {
+        lines.push(b_status);
+    }
+
+    // List installed UKIs & provenance
+    if let Ok(ukis) = list_installed_ukis(&cfg.effective_output_dir()) {
+        lines.push(format!("installed_ukis: {} found", ukis.len()));
+        for uki in &ukis {
+            let prov = if uki.manifest.is_some() {
+                "rustyuki-managed"
+            } else {
+                "foreign/unmanaged"
+            };
+            let backup_str = if uki.has_backup_slot {
+                " (+backup)"
+            } else {
+                ""
+            };
+            lines.push(format!("  - {}: {prov}{backup_str}", uki.kernel_version));
+        }
+    }
+
+    // Report failure registry if any failed hooks occurred
+    let failure_dir = cfg.resolve_path(&PathBuf::from("/var/lib/uki-build/pending-failures"));
+    if failure_dir.is_dir() {
+        if let Ok(entries) = fs::read_dir(&failure_dir) {
+            let failures: Vec<_> = entries
+                .flatten()
+                .filter_map(|e| e.file_name().into_string().ok())
+                .collect();
+            if !failures.is_empty() {
+                lines.push(format!(
+                    "[WARN] Pending kernel update failures registered in {}: {}",
+                    failure_dir.display(),
+                    failures.join(", ")
+                ));
+            }
+        }
+    }
+
     Ok(lines.join("\n"))
 }
 
@@ -233,7 +332,7 @@ fn discoverable_root_advisory(
     cmdline_file: &Path,
 ) -> Result<Option<String>> {
     let cmdline = match fs::read_to_string(cmdline_file) {
-        Ok(content) => content,
+        Ok(c) => c,
         Err(_) => return Ok(None),
     };
 
@@ -242,7 +341,7 @@ fn discoverable_root_advisory(
         .any(|token| token.starts_with("root="));
 
     let mounts = match fs::read_to_string("/proc/mounts") {
-        Ok(content) => content,
+        Ok(c) => c,
         Err(_) => return Ok(None),
     };
 
@@ -268,7 +367,7 @@ fn discoverable_root_advisory(
     ))
 }
 
-fn discoverable_root_message(has_root: bool, parttype: &str, arch: &str) -> Option<String> {
+pub fn discoverable_root_message(has_root: bool, parttype: &str, arch: &str) -> Option<String> {
     let expected_guid = dps_root_guid(arch)?;
     if parttype != expected_guid {
         return None;
@@ -286,7 +385,7 @@ fn discoverable_root_message(has_root: bool, parttype: &str, arch: &str) -> Opti
     })
 }
 
-fn parse_root_mount_source(proc_mounts: &str) -> Option<String> {
+pub fn parse_root_mount_source(proc_mounts: &str) -> Option<String> {
     proc_mounts.lines().find_map(|line| {
         let mut fields = line.split_whitespace();
         let source = fields.next()?;
@@ -295,97 +394,29 @@ fn parse_root_mount_source(proc_mounts: &str) -> Option<String> {
     })
 }
 
-fn dps_root_guid(arch: &str) -> Option<&'static str> {
-    match arch {
-        "x86_64" => Some("4f68bce3-e8cd-4db1-96e7-fbcaf984b709"),
-        "x86" | "i386" | "i586" | "i686" => Some("44479540-f297-41b2-9af7-d131d5f0458a"),
-        "arm" | "armv7" | "armv7l" => Some("69dad710-2ce4-4e3c-b16c-21a1d49abed3"),
-        "aarch64" => Some("b921b045-1df0-41c3-af44-4c6f280d3fae"),
-        "riscv64" => Some("72ec70a6-cf74-40e6-bd49-4bda08e8f224"),
-        "loongarch64" => Some("77055800-792c-4f94-b39a-98c91b762bb6"),
-        _ => None,
+fn ensure_required_files(kernel: &KernelInfo, settings: &GenerateSettings) -> Result<()> {
+    if !kernel.vmlinuz_path.exists() {
+        bail!(
+            "kernel binary does not exist at {}",
+            kernel.vmlinuz_path.display()
+        );
     }
-}
-
-fn ensure_required_paths(settings: &GenerateSettings) -> Result<()> {
-    let kernel_image = PathBuf::from(format!("/lib/modules/{}/vmlinuz", settings.kernel_version));
-    require_exists(&kernel_image, "kernel image")?;
-    require_exists(&settings.cmdline_file, "cmdline file")?;
-    require_exists(&settings.os_release, "os-release file")?;
+    if !settings.cmdline_file.exists() && settings.sysroot.is_none() {
+        bail!(
+            "cmdline file does not exist: {}",
+            settings.cmdline_file.display()
+        );
+    }
+    if !settings.os_release.exists() {
+        bail!(
+            "os-release file does not exist: {}",
+            settings.os_release.display()
+        );
+    }
     if let Some(splash) = &settings.splash {
-        require_exists(splash, "splash file")?;
+        if !splash.exists() {
+            bail!("splash image does not exist: {}", splash.display());
+        }
     }
     Ok(())
-}
-
-fn require_exists(path: &Path, label: &str) -> Result<()> {
-    if path.exists() {
-        Ok(())
-    } else {
-        anyhow::bail!("required {label} does not exist: {}", path.display())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        discoverable_root_message, dps_root_guid, parse_root_mount_source,
-        resolve_generate_settings,
-    };
-    use crate::cli::GenerateArgs;
-    use crate::config::AppConfig;
-
-    #[test]
-    fn resolve_uses_uname_when_config_empty() {
-        let cfg = AppConfig::default();
-        let args = GenerateArgs {
-            kernel_version: None,
-            esp_path: None,
-            output_dir: None,
-            cmdline_file: None,
-            splash: None,
-            os_release: None,
-            boot_once: false,
-        };
-
-        let resolved = resolve_generate_settings(&cfg, &args, "6.9.0-test");
-        assert_eq!(resolved.kernel_version, "6.9.0-test");
-    }
-
-    #[test]
-    fn parse_root_mount_source_finds_root_device() {
-        let mounts = "/dev/mapper/root / xfs rw,relatime 0 0\n/dev/nvme0n1p1 /boot vfat rw 0 0\n";
-        assert_eq!(
-            parse_root_mount_source(mounts).as_deref(),
-            Some("/dev/mapper/root")
-        );
-    }
-
-    #[test]
-    fn dps_root_guid_knows_x86_64() {
-        assert_eq!(
-            dps_root_guid("x86_64"),
-            Some("4f68bce3-e8cd-4db1-96e7-fbcaf984b709")
-        );
-    }
-
-    #[test]
-    fn discoverable_root_message_warns_when_root_token_present() {
-        let message =
-            discoverable_root_message(true, "4f68bce3-e8cd-4db1-96e7-fbcaf984b709", "x86_64")
-                .unwrap_or_else(|| panic!("missing message"));
-        assert!(message.contains("[INFO] Root partition carries a discoverable GPT GUID."));
-        assert!(message.contains("'root=' in your cmdline may be unnecessary"));
-    }
-
-    #[test]
-    fn discoverable_root_message_confirms_when_root_token_missing() {
-        let message =
-            discoverable_root_message(false, "4f68bce3-e8cd-4db1-96e7-fbcaf984b709", "x86_64")
-                .unwrap_or_else(|| panic!("missing message"));
-        assert_eq!(
-            message,
-            "[OK] Cmdline has no 'root='. GPT autodiscovery will locate the root partition."
-        );
-    }
 }

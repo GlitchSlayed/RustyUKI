@@ -14,45 +14,19 @@ fn test_esp_mountpoint() -> PathBuf {
     panic!("no writable mount point available for ESP integration tests");
 }
 
-#[allow(dead_code)]
-#[path = "../src/app.rs"]
-mod app;
-#[allow(dead_code)]
-#[path = "../src/cli.rs"]
-mod cli;
-#[allow(dead_code)]
-#[path = "../src/cmd.rs"]
-mod cmd;
-#[allow(dead_code)]
-#[path = "../src/config.rs"]
-mod config;
-#[allow(dead_code)]
-#[path = "../src/dracut.rs"]
-mod dracut;
-#[allow(dead_code)]
-#[path = "../src/efi.rs"]
-mod efi;
-#[allow(dead_code)]
-#[path = "../src/error.rs"]
-mod error;
-#[allow(dead_code)]
-#[path = "../src/hook.rs"]
-mod hook;
-#[allow(dead_code)]
-#[path = "../src/kernel.rs"]
-mod kernel;
-#[allow(dead_code)]
-#[path = "../src/ukify.rs"]
-mod ukify;
-
-use app::{confirm, generate, install, resolve_generate_settings, status, GenerateSettings};
-use cli::GenerateArgs;
-use cmd::{CommandRunner, ProcessOutput};
-use config::AppConfig;
-use dracut::build_initramfs;
-use efi::{make_efi_loader_path, validate_esp_mount};
-use kernel::{prune_stale_uki_artifacts, resolve_cmdline, sanitize_cmdline, CmdlineSettings};
-use ukify::{build_uki, UkifyParams};
+use rustyuki::app::{
+    confirm, generate, install, resolve_generate_settings, status, GenerateSettings,
+};
+use rustyuki::cli::GenerateArgs;
+use rustyuki::cmd::{CommandRunner, ProcessOutput};
+use rustyuki::config::AppConfig;
+use rustyuki::dracut::build_initramfs;
+use rustyuki::efi::{make_efi_loader_path, validate_esp_mount};
+use rustyuki::kernel::{
+    prune_stale_uki_artifacts, resolve_cmdline, sanitize_cmdline, CmdlineSettings,
+};
+use rustyuki::model::{BootBackendType, KernelFlavor, UkiManifest};
+use rustyuki::ukify::{build_uki, UkifyParams};
 
 struct ExpectedCall {
     program: String,
@@ -98,7 +72,7 @@ impl CommandRunner for MockRunner {
         if program == "ukify" {
             if let Some(idx) = args.iter().position(|a| *a == "--output") {
                 if let Some(output_path) = args.get(idx + 1) {
-                    std::fs::write(output_path, b"dummy-uki")
+                    std::fs::write(output_path, b"MZ\x90\x00dummy-pe-uki-valid-mz-header")
                         .unwrap_or_else(|e| panic!("failed to create mock ukify output: {e}"));
                 }
             }
@@ -117,6 +91,8 @@ fn default_args() -> GenerateArgs {
         splash: None,
         os_release: None,
         boot_once: false,
+        sysroot: None,
+        backend: None,
     }
 }
 
@@ -131,6 +107,8 @@ fn resolve_settings_cli_override_wins() {
         splash: Some("/override/splash.bmp".into()),
         os_release: Some("/override/os-release".into()),
         boot_once: false,
+        sysroot: None,
+        backend: None,
     };
 
     let resolved = resolve_generate_settings(&cfg, &args, "ignored");
@@ -351,7 +329,10 @@ fn cmdline_sanitization_and_resolution_match_legacy_expectations() {
     let sanitized = sanitize_cmdline(
         "BOOT_IMAGE=/vmlinuz-foo initrd=/initramfs.img root=UUID=abcd rw rd.driver.blacklist=nouveau quiet",
     );
-    assert_eq!(sanitized, "root=UUID=abcd rw quiet");
+    assert_eq!(
+        sanitized,
+        "root=UUID=abcd rw rd.driver.blacklist=nouveau quiet"
+    );
 
     let temp = TempDir::new().unwrap_or_else(|e| panic!("{e}"));
     let cmdline_file = temp.path().join("cmdline");
@@ -371,6 +352,7 @@ fn cmdline_sanitization_and_resolution_match_legacy_expectations() {
             cmdline_file: cmdline_file.clone(),
             state_dir: temp.path().join("state"),
             cmdline_min_tokens: 3,
+            sysroot: None,
         },
     )
     .unwrap_or_else(|e| panic!("{e}"));
@@ -385,10 +367,22 @@ fn prune_removes_only_unknown_kernel_efis() {
 
     let keep = out.join("linux-6.11.0.efi");
     let prune = out.join("linux-6.10.0.efi");
+    let prune_manifest = out.join("linux-6.10.0.efi.manifest.json");
+    let foreign = out.join("linux-foreign.efi");
     let other = out.join("README.txt");
 
     std::fs::write(&keep, b"keep").unwrap_or_else(|e| panic!("{e}"));
     std::fs::write(&prune, b"remove").unwrap_or_else(|e| panic!("{e}"));
+    let manifest = UkiManifest::new(
+        "6.10.0",
+        "mock-sha256",
+        "mock-cmdline-hash",
+        BootBackendType::Direct,
+        KernelFlavor::Generic,
+    );
+    let manifest_str = serde_json::to_string(&manifest).unwrap();
+    std::fs::write(&prune_manifest, manifest_str).unwrap_or_else(|e| panic!("{e}"));
+    std::fs::write(&foreign, b"foreign-uki-without-manifest").unwrap_or_else(|e| panic!("{e}"));
     std::fs::write(&other, b"other").unwrap_or_else(|e| panic!("{e}"));
 
     let removed =
@@ -397,6 +391,8 @@ fn prune_removes_only_unknown_kernel_efis() {
     assert_eq!(removed, vec![prune.clone()]);
     assert!(keep.exists());
     assert!(!prune.exists());
+    assert!(!prune_manifest.exists());
+    assert!(foreign.exists(), "foreign UKI must NOT be pruned");
     assert!(other.exists());
 }
 
@@ -420,7 +416,7 @@ fn generate_with_boot_once_sets_bootnext_immediately() {
     std::fs::create_dir_all(&kernel_dir).unwrap_or_else(|e| panic!("{e}"));
     std::fs::write(kernel_dir.join("vmlinuz"), b"kernel").unwrap_or_else(|e| panic!("{e}"));
 
-    let expected_temp_out = out.join(".linux-6.11.5-test.efi.tmp");
+    let expected_temp_out = PathBuf::from("/tmp/rustyuki-staging/.linux-6.11.5-test.efi.tmp");
     let final_out = out.join("linux-6.11.5-test.efi");
 
     let runner = MockRunner::new(vec![
@@ -428,7 +424,7 @@ fn generate_with_boot_once_sets_bootnext_immediately() {
             program: "dracut".to_string(),
             args: vec![
                 "-f".to_string(),
-                "/tmp/initramfs-6.11.5-test.img".to_string(),
+                "/tmp/rustyuki-staging/initramfs-6.11.5-test.img".to_string(),
                 "6.11.5-test".to_string(),
             ],
             output: Ok(ProcessOutput::default()),
@@ -440,7 +436,7 @@ fn generate_with_boot_once_sets_bootnext_immediately() {
                 "--linux".to_string(),
                 kernel_dir.join("vmlinuz").display().to_string(),
                 "--initrd".to_string(),
-                "/tmp/initramfs-6.11.5-test.img".to_string(),
+                "/tmp/rustyuki-staging/initramfs-6.11.5-test.img".to_string(),
                 "--cmdline".to_string(),
                 "root=/dev/test rw quiet".to_string(),
                 "--os-release".to_string(),
@@ -552,6 +548,8 @@ Boot0008* Linux UKI 6.11.5-test	HD(...)
         cmdline_file: cmdline,
         splash: None,
         os_release,
+        sysroot: None,
+        backend: BootBackendType::Direct,
     };
 
     let (built, boot_num) =
@@ -585,7 +583,7 @@ fn install_sets_bootnext_after_bootctl_update() {
     std::fs::create_dir_all(&kernel_dir).unwrap_or_else(|e| panic!("{e}"));
     std::fs::write(kernel_dir.join("vmlinuz"), b"kernel").unwrap_or_else(|e| panic!("{e}"));
 
-    let expected_temp_out = out.join(".linux-6.11.4-test.efi.tmp");
+    let expected_temp_out = PathBuf::from("/tmp/rustyuki-staging/.linux-6.11.4-test.efi.tmp");
     let final_out = out.join("linux-6.11.4-test.efi");
 
     let runner = MockRunner::new(vec![
@@ -606,7 +604,7 @@ fn install_sets_bootnext_after_bootctl_update() {
             program: "dracut".to_string(),
             args: vec![
                 "-f".to_string(),
-                "/tmp/initramfs-6.11.4-test.img".to_string(),
+                "/tmp/rustyuki-staging/initramfs-6.11.4-test.img".to_string(),
                 "6.11.4-test".to_string(),
             ],
             output: Ok(ProcessOutput::default()),
@@ -618,7 +616,7 @@ fn install_sets_bootnext_after_bootctl_update() {
                 "--linux".to_string(),
                 kernel_dir.join("vmlinuz").display().to_string(),
                 "--initrd".to_string(),
-                "/tmp/initramfs-6.11.4-test.img".to_string(),
+                "/tmp/rustyuki-staging/initramfs-6.11.4-test.img".to_string(),
                 "--cmdline".to_string(),
                 "root=/dev/test rw quiet".to_string(),
                 "--os-release".to_string(),
@@ -720,18 +718,24 @@ Boot0007* Linux UKI 6.11.4-test	HD(...)
         },
         ExpectedCall {
             program: "rpm".to_string(),
-            args: vec!["-q".to_string(), "kernel".to_string()],
+            args: vec![
+                "-qa".to_string(),
+                "--qf".to_string(),
+                "%{NAME} %{VERSION}-%{RELEASE}.%{ARCH}\n".to_string(),
+                "kernel*".to_string(),
+            ],
             output: Ok(ProcessOutput {
-                stdout: "kernel-6.11.4-test
-"
-                .to_string(),
+                stdout: "kernel-core 6.11.4-test.x86_64\n".to_string(),
                 stderr: String::new(),
             }),
         },
         ExpectedCall {
-            program: "bootctl".to_string(),
-            args: vec!["update".to_string()],
-            output: Ok(ProcessOutput::default()),
+            program: "uname".to_string(),
+            args: vec!["-r".to_string()],
+            output: Ok(ProcessOutput {
+                stdout: "6.11.4-test\n".to_string(),
+                stderr: String::new(),
+            }),
         },
     ]);
 
@@ -745,6 +749,8 @@ Boot0007* Linux UKI 6.11.4-test	HD(...)
         cmdline_file: cmdline,
         splash: None,
         os_release,
+        sysroot: None,
+        backend: BootBackendType::Direct,
     };
 
     let installed = install(&runner, &cfg, &settings).unwrap_or_else(|e| panic!("{e:#}"));
@@ -759,6 +765,14 @@ Boot0007* Linux UKI 6.11.4-test	HD(...)
 #[test]
 fn confirm_promotes_current_boot_entry_to_front() {
     let runner = MockRunner::new(vec![
+        ExpectedCall {
+            program: "systemctl".to_string(),
+            args: vec!["is-system-running".to_string()],
+            output: Ok(ProcessOutput {
+                stdout: "running\n".to_string(),
+                stderr: String::new(),
+            }),
+        },
         ExpectedCall {
             program: "efibootmgr".to_string(),
             args: vec!["--verbose".to_string()],

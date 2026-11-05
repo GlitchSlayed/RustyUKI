@@ -1,27 +1,17 @@
-#![deny(unused_must_use)]
-
-mod app;
-mod cli;
-mod cmd;
-mod config;
-mod dracut;
-mod efi;
-mod error;
-mod hook;
-mod kernel;
-mod privilege;
-mod ukify;
-
 use anyhow::{Context, Result};
-use app::{confirm, generate, install, reconcile, resolve_generate_settings, status};
 use clap::Parser;
-use cli::{Cli, Commands};
-use cmd::{CommandRunner, RealCommandRunner};
-use config::AppConfig;
 use env_logger::Env;
-use hook::install_kernel_update_hook;
 use log::LevelFilter;
-use privilege::require_root;
+use rustyuki::app::{
+    confirm, generate, install, reconcile, resolve_generate_settings, rollback, status,
+};
+use rustyuki::backend::create_backend;
+use rustyuki::cli::{Cli, Commands, GenerateArgs};
+use rustyuki::cmd::{CommandRunner, RealCommandRunner};
+use rustyuki::config::AppConfig;
+use rustyuki::hook::install_kernel_update_hook;
+use rustyuki::install;
+use rustyuki::privilege::require_root_if_live;
 
 fn init_logging(verbose: u8) {
     let level = match verbose {
@@ -46,27 +36,70 @@ fn current_kernel(runner: &dyn CommandRunner) -> Result<String> {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     init_logging(cli.verbose);
-    require_root()?;
 
-    let cfg = AppConfig::load(&cli.config)?;
+    let mut cfg = AppConfig::load(&cli.config)?;
+
+    // Apply global CLI overrides to config
+    if let Some(sysroot) = cli.sysroot.clone() {
+        cfg.uki.sysroot = Some(sysroot);
+    }
+    if let Some(backend) = cli.backend {
+        cfg.bootloader.backend = backend;
+    }
+
+    let is_offline = cfg.uki.sysroot.is_some();
     let runner = RealCommandRunner::new(cli.dry_run);
 
     match &cli.command {
         Commands::Generate(args) => {
-            let uname = current_kernel(&runner)?;
+            require_root_if_live(is_offline)?;
+            let uname = current_kernel(&runner).unwrap_or_default();
             let settings = resolve_generate_settings(&cfg, args, &uname);
-            let _ = generate(&runner, &cfg, &settings, args.boot_once)?;
+            let (path, entry) = generate(&runner, &cfg, &settings, args.boot_once)?;
+            println!("generated UKI: {} (entry {entry})", path.display());
         }
         Commands::Install(args) => {
-            let uname = current_kernel(&runner)?;
+            require_root_if_live(is_offline)?;
+            let uname = current_kernel(&runner).unwrap_or_default();
             let settings = resolve_generate_settings(&cfg, args, &uname);
-            let _ = install(&runner, &cfg, &settings)?;
+            let path = install(&runner, &cfg, &settings)?;
+            println!("installed UKI: {}", path.display());
+        }
+        Commands::Activate(args) => {
+            require_root_if_live(is_offline)?;
+            let uname = current_kernel(&runner).unwrap_or_default();
+            let target_version = args.kernel_version.as_deref().unwrap_or(&uname);
+            let output_dir = cfg.effective_output_dir();
+            let esp_path = cfg.effective_esp_path();
+
+            let installed = install::list_installed_ukis(&output_dir)?;
+            let target_uki = installed
+                .into_iter()
+                .find(|u| u.kernel_version == target_version)
+                .with_context(|| {
+                    format!("no installed UKI found for kernel version {target_version}")
+                })?;
+
+            let backend = create_backend(args.backend.unwrap_or(cfg.bootloader.backend));
+            let res = backend.activate(&runner, &target_uki, &esp_path, args.trial, is_offline)?;
+            println!("activated boot entry: {}", res.description);
+        }
+        Commands::Rollback(args) => {
+            require_root_if_live(is_offline)?;
+            let uname = current_kernel(&runner).unwrap_or_default();
+            let target_version = args.kernel_version.as_deref().unwrap_or(&uname);
+            let restored = rollback(&cfg, target_version)?;
+            println!(
+                "rolled back UKI for {target_version} -> {}",
+                restored.display()
+            );
         }
         Commands::Reconcile => {
-            let uname = current_kernel(&runner)?;
+            require_root_if_live(is_offline)?;
+            let uname = current_kernel(&runner).unwrap_or_default();
             let settings = resolve_generate_settings(
                 &cfg,
-                &cli::GenerateArgs {
+                &GenerateArgs {
                     kernel_version: Some(uname),
                     esp_path: None,
                     output_dir: None,
@@ -74,12 +107,16 @@ fn run() -> Result<()> {
                     splash: None,
                     os_release: None,
                     boot_once: false,
+                    sysroot: None,
+                    backend: None,
                 },
                 "",
             );
             reconcile(&runner, &cfg, &settings)?;
+            println!("reconcile complete");
         }
         Commands::InstallHook(args) => {
+            require_root_if_live(is_offline)?;
             let binary = args.binary_path.clone().unwrap_or_else(|| {
                 std::env::current_exe()
                     .unwrap_or_else(|_| std::path::PathBuf::from("/usr/local/bin/rustyuki"))
@@ -95,8 +132,9 @@ fn run() -> Result<()> {
             println!("{text}");
         }
         Commands::Confirm => {
+            require_root_if_live(false)?;
             let boot_num = confirm(&runner)?;
-            println!("confirmed Boot{boot_num} as the permanent default boot entry");
+            println!("confirmed {boot_num} as the permanent default boot entry");
         }
     }
 

@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+COMMAND="${1:-}"
+KERNEL_VER="${2:-unknown}"
+ENTRY_DIR_ABS="${3:-}"
+KERNEL_IMAGE="${4:-}"
+
+RUSTYUKI_BIN="/usr/bin/rustyuki"
+CONFIG_FILE="/etc/rustyuki/config.toml"
+FAILURE_LOG_DIR="/var/lib/uki-build/pending-failures"
+
+if [[ ! -x "${RUSTYUKI_BIN}" ]]; then
+    echo "rustyuki: binary not found at ${RUSTYUKI_BIN}, skipping"
+    exit 0
+fi
+
+mkdir -p "${FAILURE_LOG_DIR}"
+
+case "${COMMAND}" in
+    add)
+        echo "rustyuki: generating unified kernel image for ${KERNEL_VER}..."
+        if ! "${RUSTYUKI_BIN}" --config "${CONFIG_FILE}" generate --kernel "${KERNEL_VER}"; then
+            echo "ERROR: rustyuki failed generating UKI for ${KERNEL_VER}" >&2
+            echo "$(date -Iseconds): generate failed for ${KERNEL_VER}" > "${FAILURE_LOG_DIR}/${KERNEL_VER}.failed"
+            # Do not abort package scriptlet with non-zero exit to avoid breaking RPM transactions,
+            # but preserve explicit failure state in failure directory.
+            exit 0
+        fi
+        rm -f "${FAILURE_LOG_DIR}/${KERNEL_VER}.failed"
+        ;;
+    remove)
+        echo "rustyuki: reconciling UKI images following removal of ${KERNEL_VER}..."
+        "${RUSTYUKI_BIN}" --config "${CONFIG_FILE}" reconcile || true
+        rm -f "${FAILURE_LOG_DIR}/${KERNEL_VER}.failed"
+        ;;
+    *)
+        exit 0
+        ;;
+esac

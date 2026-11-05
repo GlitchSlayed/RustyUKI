@@ -1,18 +1,18 @@
 # Packaging & Continuous Integration
 
-This guide documents the RPM packaging specification, CI validation pipelines, and automated nightly release workflows for RustyUKI.
+This guide documents the RPM packaging specification, CI validation pipelines, and automated nightly release workflows for RustyUKI targeting **Fedora 44** and **Fedora 45**.
 
 ---
 
 ## RPM Specification
 
-The RPM spec file is located at [`.github/rpm/rustyuki.spec`](../.github/rpm/rustyuki.spec).
+The RPM spec file is located at [`.github/rpm/rustyuki.spec`](../.github/rpm/rustyuki.spec):
 
 ```spec
 Name:           rustyuki
 Version:        0.2.0
 Release:        1%{?dist}
-Summary:        Rust CLI to generate and install Fedora Unified Kernel Images
+Summary:        Reliable, distribution-independent Unified Kernel Image lifecycle manager
 
 License:        MIT
 URL:            https://github.com/GlitchSlayed/RustyUKI
@@ -20,10 +20,25 @@ Source0:        %{name}-%{version}.tar.gz
 
 BuildRequires:  cargo
 BuildRequires:  rust
+BuildRequires:  systemd-rpm-macros
+
+Requires:       dracut
+Requires:       systemd-ukify
+Requires:       efibootmgr
+Requires:       systemd-boot
+Requires:       systemd-udev
+Requires:       binutils
+
+Recommends:     sbsign
+Recommends:     pesign
+
+%{?systemd_requires}
 
 %description
-RustyUKI is a Rust-native CLI for building and installing Unified Kernel Images
-on Fedora-based systems via dracut and ukify.
+RustyUKI is a failure-resistant Unified Kernel Image (UKI) manager for Linux systems.
+It provides distinct generation, installation, and activation stages, supporting both
+Direct UEFI and systemd-boot backends, multi-stage health assessment, safe fallback slots,
+CachyOS and Fedora kernel compatibility, and offline sysroot generation.
 
 %prep
 %autosetup -n %{name}-%{version}
@@ -32,16 +47,39 @@ on Fedora-based systems via dracut and ukify.
 cargo build --release --locked
 
 %install
+# Binary
 install -Dpm0755 target/release/rustyuki %{buildroot}%{_bindir}/rustyuki
+
+# Configuration
+install -Dpm0644 packaging/config.toml %{buildroot}%{_sysconfdir}/rustyuki/config.toml
+
+# kernel-install hook
+install -Dpm0755 packaging/90-rustyuki.install %{buildroot}%{_prefix}/lib/kernel/install.d/90-rustyuki.install
+
+# Systemd boot confirmation unit
+install -Dpm0644 packaging/rustyuki-boot-confirm.service %{buildroot}%{_unitdir}/rustyuki-boot-confirm.service
+
+# State directory for failure tracking and cmdline hash cache
+install -d -m 0755 %{buildroot}%{_sharedstatedir}/uki-build
+
+%post
+%systemd_post rustyuki-boot-confirm.service
+
+%preun
+%systemd_preun rustyuki-boot-confirm.service
+
+%postun
+%systemd_postun_with_restart rustyuki-boot-confirm.service
 
 %files
 %license LICENSE
 %doc README.md
 %{_bindir}/rustyuki
-
-%changelog
-* Fri Mar 13 2026 RustyUKI CI <ci@example.com> - 0.2.0-1
-- Initial Fedora RPM spec for automated CI builds
+%dir %{_sysconfdir}/rustyuki
+%config(noreplace) %{_sysconfdir}/rustyuki/config.toml
+%{_prefix}/lib/kernel/install.d/90-rustyuki.install
+%{_unitdir}/rustyuki-boot-confirm.service
+%dir %{_sharedstatedir}/uki-build
 ```
 
 ### Local RPM Build
@@ -50,7 +88,7 @@ To build an RPM locally on a Fedora workstation:
 
 ```bash
 # 1. Install packaging tools
-sudo dnf install -y git rpm-build rpmdevtools cargo rust
+sudo dnf install -y git rpm-build rpmdevtools cargo rust systemd-rpm-macros
 
 # 2. Set up the RPM build tree
 rpmdev-setuptree
@@ -87,26 +125,17 @@ flowchart LR
 ### Features Verified:
 - **Matrix Testing**: Validates code and dependencies against Fedora 44 (`fedora:44`) and Fedora 45 (`fedora:45`).
 - **Rustfmt Compliance**: Ensures consistent formatting across all modules and tests.
-- **Unit and Integration Tests**: Runs tests in [`tests/integration_cli.rs`](../tests/integration_cli.rs) using mocked system calls (`MockRunner`).
+- **Unit and Integration Tests**: Runs tests in [`tests/integration_cli.rs`](../tests/integration_cli.rs) and [`tests/backend_and_safety.rs`](../tests/backend_and_safety.rs) using mocked system calls (`MockRunner`).
 - **Strict Clippy**: Enforces `-D warnings` across all code.
 - **Lockfile Integrity**: Enforces `--locked` flags when `Cargo.lock` is present.
 
 ---
 
-## Automated Nightly RPM Releases (`rpm.yml`)
+## Automated RPM CI & Smoke Tests (`rpm.yml`)
 
-The workflow in [`.github/workflows/rpm.yml`](../.github/workflows/rpm.yml) handles dual-target automated packaging:
-
-### 1. `rpm-ci` (On Pull Requests and Pushes)
-- Spins up containers across a matrix for both `fedora:44` and `fedora:45`.
-- Packages the source tarball and builds binary and source RPMs (`.fc44` and `.fc45`).
-- Uploads the resulting RPMs as separate workflow artifacts for testing without creating releases.
-
-### 2. `plan-release`, `build-release-rpms`, and `publish-release` (Scheduled / Manual Dispatch)
-- Runs daily at `03:17 UTC` and on `workflow_dispatch`.
-- Inspects the latest `rpm-nightly-*` release tag against `HEAD`.
-- If new commits were added (or if forced via manual dispatch):
-  1. Concurrently builds clean binary and source RPMs on both **Fedora 44** and **Fedora 45** containers.
-  2. Aggregates all RPM packages (`.fc44.x86_64.rpm`, `.fc44.src.rpm`, `.fc45.x86_64.rpm`, `.fc45.src.rpm`).
-  3. Creates a single consolidated GitHub Release tagged `rpm-nightly-YYYYMMDD`.
-  4. Publishes all built `.rpm` and `.src.rpm` files as release assets.
+The workflow in [`.github/workflows/rpm.yml`](../.github/workflows/rpm.yml) builds the RPM package across Fedora 44 and Fedora 45, followed by an immediate installation smoke test:
+1. `dnf install -y dist/rustyuki-*.x86_64.rpm`
+2. `rustyuki --version`
+3. Verifies proper installation of `/usr/lib/kernel/install.d/90-rustyuki.install`
+4. Verifies `/etc/rustyuki/config.toml`
+5. Verifies `/usr/lib/systemd/system/rustyuki-boot-confirm.service`

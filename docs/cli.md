@@ -11,18 +11,20 @@ rustyuki [GLOBAL OPTIONS] <SUBCOMMAND> [SUBCOMMAND OPTIONS]
 ```
 
 > [!NOTE]
-> RustyUKI operations require root privileges because they interact with the EFI System Partition, `/proc`, `/lib/modules`, and UEFI NVRAM. Run commands with `sudo`.
+> RustyUKI operations typically require root privileges because they interact with the EFI System Partition, `/proc`, `/lib/modules`, and UEFI NVRAM. Run commands with `sudo`. Offline operations with `--sysroot` pointing to an unprivileged directory or image root do not require root.
 
 ---
 
 ## Global Options
 
-The following flags apply to all subcommands and can be placed before or after the subcommand:
+The following flags apply to all subcommands:
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `--config <PATH>` | File path | `/etc/uki/uki.conf` | Path to the TOML configuration file. If the file does not exist, internal defaults are used. |
+| `--config <PATH>` | File path | `/etc/rustyuki/config.toml` (fallback `/etc/uki/uki.conf`) | Path to the TOML configuration file. If the file does not exist, internal defaults are used. |
 | `--dry-run` | Flag | `false` | Log all external commands (`dracut`, `ukify`, `efibootmgr`, `bootctl`, `systemctl`) without executing them or modifying the filesystem. |
+| `--sysroot <PATH>` | Directory path | None (live host `"/"`) | Target sysroot directory for offline installation and image-building. Completely disables host NVRAM access. |
+| `--backend <TYPE>` | Enum (`direct`, `systemd-boot`) | Config default | Override bootloader management backend. |
 | `-v` | Flag | `INFO` | Enable `DEBUG` level logging. |
 | `-vv` | Flag | `INFO` | Enable `TRACE` level logging for granular troubleshooting. |
 | `-h`, `--help` | Flag | — | Print command-line help information. |
@@ -34,7 +36,7 @@ The following flags apply to all subcommands and can be placed before or after t
 
 ### 1. `status`
 
-Inspects and displays the resolved runtime configuration and hardware boot environment.
+Inspects and displays the resolved runtime configuration, active boot backend, discovered kernels, and installed UKIs on the ESP.
 
 ```bash
 sudo rustyuki status
@@ -42,35 +44,27 @@ sudo rustyuki status
 
 **Output Fields:**
 - `kernel`: Running kernel version reported by `uname -r`.
+- `backend`: Selected boot backend (`direct` or `systemd-boot`).
 - `esp_path`: Active EFI System Partition mountpoint.
-- `output_dir`: Directory where UKI binaries are placed.
+- `output_dir`: Directory where UKI binaries are placed (`/EFI/Linux`).
 - `cmdline_file`: Path to the active kernel command line file.
 - **GPT autodiscovery advisory**: Advises if your root partition carries a Discoverable Partitions Specification (DPS) GPT type GUID and whether `root=` is redundant or missing in your cmdline.
 - `os_release`: Path to the `os-release` file used for UKI metadata.
-
-**Example Output:**
-```text
-kernel: 6.17.4-100.fc44.x86_64
-esp_path: /boot/efi
-output_dir: /boot/efi/EFI/Linux
-cmdline_file: /etc/kernel/cmdline
-[INFO] Root partition carries a discoverable GPT GUID.
-       'root=' in your cmdline may be unnecessary on this system.
-       Consider removing it and testing with: rustyuki generate --dry-run
-os_release: /etc/os-release
-```
+- **Bootloader status**: Current NVRAM boot entries or `bootctl status`.
+- **Installed UKIs**: Lists installed UKIs, their provenance status (RustyUKI managed or foreign/unmanaged), and whether a `.prev.efi` fallback slot exists.
 
 ---
 
 ### 2. `generate`
 
-Executes the two-stage build pipeline:
-1. Validates ESP preflight checks (mount status, writability, free space).
-2. Generates the initramfs with `dracut`.
-3. Resolves, sanitizes, and verifies the kernel cmdline.
-4. Assembles the UKI PE binary with `ukify` using an atomic write.
-5. Registers a new EFI boot entry with `efibootmgr` without altering permanent `BootOrder`.
-6. (Optional) Schedules the entry for a one-time trial via `efibootmgr --bootnext` if `--boot-once` is set.
+Executes Stage 1 UKI generation in isolated staging storage without modifying the ESP or firmware NVRAM state:
+1. Validates ESP preflight capacity and permissions.
+2. Resolves target kernel (supporting Fedora and CachyOS variants).
+3. Generates the initramfs with `dracut` in staging.
+4. Resolves, sanitizes, and verifies the kernel cmdline.
+5. Assembles the UKI PE binary with `ukify`.
+6. Performs Secure Boot signing (if configured with `pesign` or `sbsign`).
+7. Inspects and validates PE header magic (`MZ`) and cryptographic SHA-256 hash.
 
 ```bash
 sudo rustyuki generate [OPTIONS]
@@ -81,62 +75,67 @@ sudo rustyuki generate [OPTIONS]
 | Flag | Argument | Default | Description |
 |---|---|---|---|
 | `--kernel-version` | String | `uname -r` or config | Target kernel version (must have `/lib/modules/<ver>/vmlinuz`). |
-| `--esp-path` | Directory path | Config `/boot/efi` | Mountpoint of the EFI System Partition. |
-| `--output-dir` | Directory path | Config `/boot/efi/EFI/Linux` | Target directory for the final `.efi` binary. |
+| `--esp-path` | Directory path | Config `/efi` | Mountpoint of the EFI System Partition. |
+| `--output-dir` | Directory path | Config `/efi/EFI/Linux` | Target directory for the final `.efi` binary. |
 | `--cmdline-file` | File path | Config `/etc/kernel/cmdline` | File to read kernel parameters from. |
-| `--splash` | File path | Config or none | Path to a BMP or PNG splash logo embedded in the UKI. |
-| `--os-release` | File path | Config `/etc/os-release` | OS metadata file embedded into the `.osrel` PE section. |
-| `--boot-once` | Flag | `false` | Sets the new entry as `BootNext` for one-time trial testing. |
-
-**Examples:**
-```bash
-# Build for currently running kernel
-sudo rustyuki generate
-
-# Dry run: view commands without modifying ESP or NVRAM
-sudo rustyuki generate --dry-run
-
-# Build a specific installed kernel
-sudo rustyuki generate --kernel-version 6.17.4-100.fc44.x86_64
-
-# Build and schedule for a single trial boot
-sudo rustyuki generate --boot-once
-```
+| `--splash` | File path | Config or none | Path to a BMP splash logo embedded in the UKI. |
+| `--os-release` | File path | Config `/usr/lib/os-release` | OS metadata file embedded into the `.osrel` PE section. |
+| `--boot-once` | Flag | `false` | Arms a one-time trial boot after generation. |
+| `--sysroot` | Directory path | None | Target root directory for offline generation. |
+| `--backend` | Enum | Config | Backend override (`direct` or `systemd-boot`). |
 
 ---
 
 ### 3. `install`
 
-The primary command for activating RustyUKI. It implements a safe trial-boot installation workflow:
-
-1. Performs ESP preflight validation checks.
-2. Creates and enables the systemd unit `/etc/systemd/system/rustyuki-boot-confirm.service`.
-3. Builds the UKI for the target kernel and registers it as an EFI boot entry.
-4. Programs `BootNext` to trial boot this new UKI on the very next reboot.
-5. Queries `rpm -q kernel` and prunes any stale `linux-*.efi` images in the output directory.
-6. Runs `bootctl update` to synchronize the EFI boot environment.
+Executes the complete installation pipeline:
+1. Generates and validates the UKI binary in staging.
+2. Performs durable installation onto the ESP (syncing file data, preserving existing UKI in `.prev.efi` fallback slot, atomic FAT rename, syncing parent directory).
+3. Writes sidecar provenance metadata (`.manifest.json`).
+4. Installs and enables `rustyuki-boot-confirm.service`.
+5. Arms trial boot (`BootNext` for direct UEFI, or `bootctl set-oneshot` for systemd-boot).
 
 ```bash
 sudo rustyuki install [OPTIONS]
 ```
 
-**Options:** Accepts all flags available on `generate` (except `--boot-once`, which is enabled automatically by `install`).
+---
 
-**Example:**
+### 4. `activate`
+
+Manually activates a bootloader backend entry for an already-installed UKI:
+
 ```bash
-sudo rustyuki install
+sudo rustyuki activate --kernel-version 6.17.4-100.fc44.x86_64 [--boot-once]
 ```
+
+**Options:**
+- `--kernel-version <VERSION>`: Kernel version to activate.
+- `--boot-once`: Sets as a one-time trial instead of changing permanent default.
+- `--sysroot <PATH>`: Target sysroot for offline activation.
+- `--backend <direct|systemd-boot>`: Backend override.
 
 ---
 
-### 4. `reconcile`
+### 5. `rollback`
 
-Rebuilds UKIs for all currently installed kernel packages and cleans up orphaned files.
+Restores the previous known-working UKI from the `.prev.efi` fallback slot:
 
-1. Queries installed kernels via `rpm -q kernel` that have a corresponding `/lib/modules/<version>/vmlinuz`.
-2. Generates a fresh UKI for each installed kernel.
-3. Scans the output directory and deletes any `linux-*.efi` file that does not match an installed kernel.
-4. Executes `bootctl update`.
+```bash
+sudo rustyuki rollback --kernel-version 6.17.4-100.fc44.x86_64
+```
+
+Restores `linux-<version>.prev.efi` back to `linux-<version>.efi` atomically without recompiling.
+
+---
+
+### 6. `reconcile`
+
+Reconciles installed kernels against UKIs present on the ESP:
+1. Queries installed kernels across Fedora stock (`kernel-core`), CachyOS (`kernel-cachyos-lto`), and custom RPM variants.
+2. Generates missing UKIs for installed kernels.
+3. Prunes stale UKIs whose kernel packages have been uninstalled.
+4. **Safety Check**: Checks `.manifest.json` before deleting any file. Never deletes foreign/unmanaged UKIs or the currently running kernel.
 
 ```bash
 sudo rustyuki reconcile
@@ -144,50 +143,22 @@ sudo rustyuki reconcile
 
 ---
 
-### 5. `confirm`
+### 7. `install-hook`
 
-Promotes the currently booted trial UKI to the front of `BootOrder` and clears `BootNext`.
+Installs the `kernel-install` plugin script into `/usr/lib/kernel/install.d/90-rustyuki.install`:
 
-Normally, `confirm` is run automatically early during boot by `rustyuki-boot-confirm.service`. You can also execute it manually after booting into a trial UKI.
-
-```bash
-sudo rustyuki confirm
-```
-
-**Mechanism:**
-1. Queries `efibootmgr --verbose` to identify the active `BootCurrent` entry ID.
-2. Reconstructs `BootOrder` with `BootCurrent` at index 0.
-3. Invokes `efibootmgr --bootorder ...`.
-4. Invokes `efibootmgr --delete-bootnext`.
-
----
-
-### 6. `install-hook`
-
-Installs the Fedora `kernel-install` hook to make UKI maintenance fully automatic across OS updates.
-
-```bash
-sudo rustyuki install-hook [OPTIONS]
-```
-
-**Options:**
-
-| Flag | Argument | Default | Description |
-|---|---|---|---|
-| `--plugin-path` | File path | `/usr/lib/kernel/install.d/90-rustyuki.install` | Path where the executable plugin script is created. |
-| `--binary-path` | File path | Current executable or `/usr/local/bin/rustyuki` | Path to the RustyUKI binary invoked by the plugin. |
-
-**Example:**
 ```bash
 sudo rustyuki install-hook
 ```
 
 ---
 
-## Exit Codes
+### 8. `confirm`
 
-| Exit Code | Meaning |
-|---|---|
-| `0` | Success. |
-| `1` | General error (missing files, command execution failure, invalid configuration, permission denied). |
-| `2` | Clap argument parsing error (invalid arguments or flags). |
+Evaluates system health via `systemctl is-system-running` and promotes the trial boot to the permanent default:
+- If system is `running` or `degraded`, updates `BootOrder` (direct UEFI) or runs `systemd-bless-boot good` (systemd-boot).
+- If system is in `emergency`, `rescue`, or `maintenance` mode, **refuses confirmation** and leaves the previous boot order intact.
+
+```bash
+sudo rustyuki confirm
+```

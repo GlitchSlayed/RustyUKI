@@ -1,23 +1,39 @@
 # Backups & Emergency Recovery Runbook
 
-Bootloader modifications directly impact system availability. This guide covers mandatory pre-flight backups, diagnostic strategies, and step-by-step recovery procedures from a Live USB.
+Bootloader modifications directly impact system availability. This guide covers pre-flight backups, automatic rollback commands, diagnostic strategies, and recovery procedures from a Live USB.
 
 ---
 
-## Pre-Flight Backups
+## 1. Instant Fallback Slot Rollback (No Live USB Required)
+
+If an updated UKI boots into a regressed state or fails to start userspace properly:
+
+1. **Reboot**:
+   Because RustyUKI arms trial boots via `BootNext` or `bootctl set-oneshot`, an interrupted boot or power cycle immediately falls back to your previous working bootloader or prior kernel entry.
+
+2. **Roll Back via RustyUKI**:
+   Once booted into any working shell or rescue prompt:
+   ```bash
+   sudo rustyuki rollback --kernel-version <kernel_version>
+   ```
+   This atomically restores `linux-<version>.prev.efi` over `linux-<version>.efi` without requiring kernel recompilation.
+
+---
+
+## 2. Pre-Flight Backups
 
 Perform these backup steps before generating or installing your first UKI.
 
 ### 1. Back Up the EFI System Partition (ESP)
 
-Archive your entire `/boot/efi` partition to an external USB drive:
+Archive your entire ESP partition to an external USB drive:
 
 ```bash
 # Locate your ESP partition
 lsblk -o NAME,PARTTYPE,FSTYPE,MOUNTPOINT | grep -i efi
 
 # Create tarball archive
-sudo tar -czvf /path/to/external-usb/esp-backup-$(date +%Y%m%d).tar.gz /boot/efi/
+sudo tar -czvf /path/to/external-usb/esp-backup-$(date +%Y%m%d).tar.gz /efi/ # or /boot/efi/
 ```
 
 > [!CAUTION]
@@ -36,8 +52,8 @@ efibootmgr -v > /path/to/external-usb/efibootmgr-backup-$(date +%Y%m%d).txt
 A missing or mismatched `root=` parameter will cause the kernel to drop into an `initramfs` emergency shell.
 
 ```bash
-# Diff configured cmdline against active running cmdline
-diff -u <(cat /etc/kernel/cmdline) <(cat /proc/cmdline)
+# Verify configured cmdline
+cat /etc/kernel/cmdline
 
 # Verify the root partition UUID matches findmnt
 findmnt -n -o UUID /
@@ -49,11 +65,12 @@ findmnt -n -o UUID /
 
 | Symptom | Root Cause | Fix |
 |---|---|---|
-| **Drastic drop to emergency shell (`dracut-initqueue` timeout)** | Kernel cmdline has missing or incorrect `root=UUID=...` | Boot via GRUB fallback or Live USB, fix `/etc/kernel/cmdline`, rebuild UKI. |
-| **Firmware skips entry and boots BIOS/Setup** | Secure Boot enabled with an unsigned UKI binary | Disable Secure Boot in UEFI Setup, or sign the UKI binary before booting. |
-| **Kernel panic: `Unable to mount root fs`** | Initramfs was built without necessary storage drivers (e.g., missing NVMe or filesystem module) | Add missing drivers via `[dracut] extra_args = ["--force-drivers", "..."]` in `/etc/uki/uki.conf`. |
-| **`efibootmgr` fails with `No space left on device`** | UEFI NVRAM variable storage is full | Delete old or duplicate entries using `efibootmgr -b <XXXX> -B`. |
-| **ESP out of space during build** | Multiple kernels or large initramfs images filled the ESP | Run `rustyuki reconcile` to prune stale UKIs, or remove unnecessary kernels via `dnf remove`. |
+| **Drop to emergency shell (`dracut-initqueue` timeout)** | Kernel cmdline has missing or incorrect `root=UUID=...` | Boot via fallback entry, edit `/etc/kernel/cmdline`, run `sudo rustyuki install`. |
+| **Firmware skips entry and boots BIOS/Setup** | Secure Boot enabled with an unsigned UKI binary | Configure `[signing]` in `/etc/rustyuki/config.toml` (`tool = "sbsign"` or `"pesign"`), or enroll key. |
+| **Kernel panic: `Unable to mount root fs`** | Initramfs was built without necessary storage drivers (e.g., missing NVMe or filesystem module) | Add missing drivers via `[dracut] extra_args = ["--force-drivers", "..."]` in `config.toml`. |
+| **`efibootmgr` fails with `No space left on device`** | UEFI NVRAM variable storage is full | Delete stale or duplicate entries using `efibootmgr -b <XXXX> -B`. |
+| **ESP out of space during build** | Multiple kernels or large initramfs images filled the ESP | Run `rustyuki reconcile` to prune stale UKIs with valid manifests, or clean older packages with `dnf remove`. |
+| **`rustyuki confirm` fails with health error** | System booted into degraded or emergency target | Run `systemctl --failed` to inspect broken units. Resolve issues before permanent confirmation. |
 
 ---
 
@@ -74,8 +91,8 @@ lsblk -o NAME,FSTYPE,PARTTYPE,SIZE,MOUNTPOINT
 ```
 
 Identify:
-- **Root partition** (e.g. `/dev/nvme0n1p3` or `/dev/sda3`, often `btrfs`, `ext4`, or `xfs`)
-- **ESP partition** (e.g. `/dev/nvme0n1p1` or `/dev/sda1`, `vfat` with partition type `c12a7328-f81f-11d2-ba4b-00a0c93ec93b`)
+- **Root partition** (e.g. `/dev/nvme0n1p3`, often `btrfs`, `ext4`, or `xfs`)
+- **ESP partition** (e.g. `/dev/nvme0n1p1`, `vfat`)
 
 ### Step 3: Mount the ESP Partition
 
@@ -84,46 +101,27 @@ sudo mkdir -p /mnt/target-esp
 sudo mount /dev/nvme0n1p1 /mnt/target-esp
 ```
 
-### Step 4: Choose a Recovery Path
+### Step 4: Restore Backup Slot or Archive
 
-#### Option A: Restore the ESP from Archive (Recommended)
-
-If you made a tarball backup of `/boot/efi`:
-
+#### Option A: Restore the Fallback Slot Directly
+If `linux-<version>.prev.efi` exists on the mounted ESP:
 ```bash
-# Restore ESP files
+cd /mnt/target-esp/EFI/Linux/
+sudo cp -a linux-<version>.prev.efi linux-<version>.efi
+sudo sync
+```
+
+#### Option B: Restore the ESP from Archive
+If you made a tarball backup of `/efi`:
+```bash
 sudo rm -rf /mnt/target-esp/*
-sudo tar -xzvf /path/to/external-usb/esp-backup-YYYYMMDD.tar.gz -C /mnt/target-esp/ --strip-components=2
+sudo tar -xzvf /path/to/external-usb/esp-backup-YYYYMMDD.tar.gz -C /mnt/target-esp/ --strip-components=1
+sudo sync
 ```
 
-#### Option B: Recreate the Fedora GRUB Boot Entry in NVRAM
-
-If GRUB binaries are intact in the ESP (`\EFI\fedora\shimx64.efi` or `grubx64.efi`), restore the UEFI NVRAM boot entry directly:
-
+#### Option C: Recreate the Boot Entry in NVRAM
+If firmware lost the entry:
 ```bash
-sudo efibootmgr --create \
-  --disk /dev/nvme0n1 \
-  --part 1 \
-  --label "Fedora" \
-  --loader "\EFI\fedora\shimx64.efi"
+sudo efibootmgr --create --disk /dev/nvme0n1 --part 1 --label "Linux UKI Fallback" --loader '\EFI\Linux\linux-<version>.efi'
 ```
-
-#### Option C: Remove a Broken UKI Boot Entry
-
-If an invalid entry is preventing clean boot sequences:
-
-```bash
-# List all entries
-sudo efibootmgr -v
-
-# Delete the problematic entry (e.g. Boot0007)
-sudo efibootmgr -b 0007 -B
-```
-
-### Step 5: Unmount and Reboot
-
-```bash
-sudo umount /mnt/target-esp
-sudo reboot
-```
-Remove the Live USB and verify the machine boots normally.
+Reboot and select the entry from firmware.

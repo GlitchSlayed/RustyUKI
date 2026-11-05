@@ -1,0 +1,74 @@
+# RustyUKI Default Configuration
+# Location: /etc/rustyuki/config.toml
+
+[uki]
+# Output directory for assembled UKI PE binaries
+output_dir = "/efi/EFI/Linux"
+
+# EFI System Partition root
+esp_path = "/efi"
+
+# Override kernel release version (empty = active kernel / passed version)
+kernel_version = ""
+
+# Auto-detect boot command line parameters from live system and /etc/kernel/cmdline
+auto_detect_cmdline = true
+
+# Fallback or configured command line if auto-detection is disabled
+configured_cmdline = "root=UUID=auto rw quiet"
+
+# Path to persistent cmdline override file
+cmdline_file = "/etc/kernel/cmdline"
+
+# Directory for caching validated cmdline hashes
+cmdline_state_dir = "/var/lib/uki-build"
+
+# Minimum required whitespace-separated tokens for cmdline sanity check
+cmdline_min_tokens = 3
+
+# Optional graphical boot splash bitmap (BMP)
+splash = ""
+
+# Path to os-release file
+os_release = "/usr/lib/os-release"
+
+# Target sysroot for offline image building (empty = live host "/")
+sysroot = ""
+
+[dracut]
+# Extra arguments passed to dracut during stage 1 initramfs creation
+# e.g. ["--no-hostonly", "--reproducible"]
+extra_args = []
+
+[ukify]
+# Extra arguments passed to ukify during stage 2 UKI PE assembly
+extra_args = []
+
+[bootloader]
+# Boot management backend: "direct" (Direct UEFI via efibootmgr) or "systemd-boot"
+backend = "direct"
+
+# Automatically arm one-shot trial boot for newly generated UKIs
+trial_boot = true
+
+# Keep previous working UKI as .prev.efi fallback slot
+keep_backup = true
+
+# Automatically prune stale UKIs during reconciliation
+prune_stale_images = true
+
+[signing]
+# Enable Secure Boot PE signing
+enabled = false
+
+# Signing tool: "pesign" or "sbsign"
+tool = "sbsign"
+
+# Path to X.509 certificate for signing (PEM or DER)
+cert_path = "/etc/pki/sb/db.crt"
+
+# Path to private key for signing (PEM)
+key_path = "/etc/pki/sb/db.key"
+
+# Optional NSS database nickname or PKCS#11 token for pesign
+token = ""

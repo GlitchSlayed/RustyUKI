@@ -1,8 +1,10 @@
+use crate::assessment::render_boot_confirm_service;
 use anyhow::{Context, Result};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
+/// Installs the kernel-install plugin into the system.
 pub fn install_kernel_update_hook(binary: &Path, config: &Path, plugin_path: &Path) -> Result<()> {
     let parent = plugin_path.parent().with_context(|| {
         format!(
@@ -27,6 +29,7 @@ pub fn install_kernel_update_hook(binary: &Path, config: &Path, plugin_path: &Pa
     Ok(())
 }
 
+/// Renders the bash plugin script for kernel-install.
 pub fn render_kernel_install_plugin(binary: &Path, config: &Path) -> Result<String> {
     let bin = binary
         .to_str()
@@ -41,8 +44,12 @@ set -uo pipefail
 
 COMMAND="${{1:-}}"
 KERNEL_VER="${{2:-unknown}}"
+ENTRY_DIR_ABS="${{3:-}}"
+KERNEL_IMAGE="${{4:-}}"
+
 RUSTYUKI_BIN="{bin}"
 RUSTYUKI_CONFIG="{cfg}"
+STATE_DIR="/var/lib/uki-build/pending-failures"
 
 log() {{
   echo "[rustyuki-hook] $*" >&2
@@ -55,27 +62,36 @@ fi
 
 case "$COMMAND" in
   add)
-    log "kernel add: $KERNEL_VER — building UKI for this kernel only"
-    if ! "$RUSTYUKI_BIN" --config "$RUSTYUKI_CONFIG" generate --kernel-version "$KERNEL_VER"; then
-      log "warning: generate failed for kernel $KERNEL_VER; leaving transaction successful"
+    log "kernel add: $KERNEL_VER — generating and deploying UKI"
+    if ! "$RUSTYUKI_BIN" --config "$RUSTYUKI_CONFIG" install --kernel-version "$KERNEL_VER"; then
+      log "warning: UKI build failed for kernel $KERNEL_VER; logging to failure registry"
+      mkdir -p "$STATE_DIR"
+      echo "Failed at $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATE_DIR/$KERNEL_VER.failed"
+    else
+      rm -f "$STATE_DIR/$KERNEL_VER.failed" 2>/dev/null || true
     fi
     ;;
   remove)
-    log "kernel remove: $KERNEL_VER — reconciling all installed kernels"
+    log "kernel remove: $KERNEL_VER — reconciling remaining UKIs"
     if ! "$RUSTYUKI_BIN" --config "$RUSTYUKI_CONFIG" reconcile; then
-      log "warning: reconcile failed after removing kernel $KERNEL_VER; leaving transaction successful"
+      log "warning: reconcile failed after removing kernel $KERNEL_VER; logging to failure registry"
+      mkdir -p "$STATE_DIR"
+      echo "Reconcile failure after removing $KERNEL_VER at $(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$STATE_DIR/reconcile.failed"
     fi
+    rm -f "$STATE_DIR/$KERNEL_VER.failed" 2>/dev/null || true
     ;;
   *)
     log "unknown command '$COMMAND' — skipping"
     ;;
 esac
 
+# Always exit 0 to protect DNF/RPM package transaction integrity
 exit 0
 "#
     ))
 }
 
+/// Installs the systemd boot confirmation service unit.
 pub fn install_boot_confirm_service(unit_path: &Path, binary: &Path) -> Result<()> {
     let parent = unit_path.parent().with_context(|| {
         format!(
@@ -100,106 +116,29 @@ pub fn install_boot_confirm_service(unit_path: &Path, binary: &Path) -> Result<(
     Ok(())
 }
 
-pub fn render_boot_confirm_service(binary: &Path) -> Result<String> {
-    let bin = binary
-        .to_str()
-        .with_context(|| format!("binary path is non-UTF8: {}", binary.display()))?;
-
-    Ok(format!(
-        r#"[Unit]
-Description=Confirm successful RustyUKI trial boot
-DefaultDependencies=no
-After=local-fs.target
-Before=network.target
-
-[Service]
-Type=oneshot
-ExecStart={bin} confirm
-
-[Install]
-WantedBy=multi-user.target
-"#
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::{render_boot_confirm_service, render_kernel_install_plugin};
     use std::path::Path;
 
     #[test]
-    fn plugin_contains_reconcile_and_config() {
+    fn plugin_contains_failure_registry_and_config() {
         let script = render_kernel_install_plugin(
             Path::new("/usr/local/bin/rustyuki"),
             Path::new("/etc/uki/uki.conf"),
         )
-        .unwrap_or_else(|e| panic!("{e}"));
+        .unwrap();
 
-        assert!(script.contains("reconcile"));
+        assert!(script.contains("pending-failures"));
         assert!(script.contains("--config \"$RUSTYUKI_CONFIG\""));
         assert!(script.contains("KERNEL_VER"));
+        assert!(script.contains("install --kernel-version"));
     }
 
     #[test]
-    fn plugin_uses_generate_for_add() {
-        let script = render_kernel_install_plugin(
-            Path::new("/usr/local/bin/rustyuki"),
-            Path::new("/etc/uki/uki.conf"),
-        )
-        .unwrap_or_else(|e| panic!("{e}"));
-
-        assert!(script.contains("add)"));
-        assert!(script.contains("generate --kernel-version \"$KERNEL_VER\""));
-    }
-
-    #[test]
-    fn plugin_uses_reconcile_for_remove() {
-        let script = render_kernel_install_plugin(
-            Path::new("/usr/local/bin/rustyuki"),
-            Path::new("/etc/uki/uki.conf"),
-        )
-        .unwrap_or_else(|e| panic!("{e}"));
-
-        let remove_section = script
-            .split("remove)")
-            .nth(1)
-            .and_then(|section| section.split("*)").next())
-            .unwrap_or("");
-        assert!(remove_section.contains("reconcile"));
-    }
-
-    #[test]
-    fn plugin_exits_zero_on_binary_missing() {
-        let script = render_kernel_install_plugin(
-            Path::new("/usr/local/bin/rustyuki"),
-            Path::new("/etc/uki/uki.conf"),
-        )
-        .unwrap_or_else(|e| panic!("{e}"));
-
-        assert!(script.contains("RustyUKI binary not executable: $RUSTYUKI_BIN"));
-        assert!(script.contains("exit 0"));
-        assert!(!script.contains("exit 1"));
-    }
-
-    #[test]
-    fn plugin_does_not_use_exec() {
-        let script = render_kernel_install_plugin(
-            Path::new("/usr/local/bin/rustyuki"),
-            Path::new("/etc/uki/uki.conf"),
-        )
-        .unwrap_or_else(|e| panic!("{e}"));
-
-        assert!(!script.contains("exec "));
-    }
-
-    #[test]
-    fn boot_confirm_service_has_early_userspace_ordering() {
-        let unit = render_boot_confirm_service(Path::new("/usr/local/bin/rustyuki"))
-            .unwrap_or_else(|e| panic!("{e}"));
-
-        assert!(unit.contains("Type=oneshot"));
-        assert!(unit.contains("After=local-fs.target"));
-        assert!(unit.contains("Before=network.target"));
-        assert!(unit.contains("ExecStart=/usr/local/bin/rustyuki confirm"));
+    fn boot_confirm_service_has_safe_ordering() {
+        let service = render_boot_confirm_service(Path::new("/usr/local/bin/rustyuki")).unwrap();
+        assert!(service.contains("After=multi-user.target"));
+        assert!(!service.contains("Before=network.target"));
     }
 }

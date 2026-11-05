@@ -1,0 +1,13 @@
+[Unit]
+Description=RustyUKI Boot Confirmation & Health Assessment
+Documentation=https://github.com/GlitchSlayed/RustyUKI
+After=multi-user.target graphical.target systemd-user-sessions.service
+Wants=multi-user.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/rustyuki confirm
+
+[Install]
+WantedBy=multi-user.target

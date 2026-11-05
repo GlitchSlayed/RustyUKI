@@ -1,6 +1,6 @@
 # RustyUKI Documentation
 
-Welcome to the comprehensive documentation for **RustyUKI**, a Rust-native CLI designed to build, install, verify, and maintain Unified Kernel Images (UKIs) on Fedora and Fedora-based Linux distributions.
+Welcome to the comprehensive documentation for **RustyUKI**, a reliable, distribution-independent Unified Kernel Image (UKI) manager designed for Fedora, CachyOS, and other modern Linux distributions.
 
 ---
 
@@ -13,7 +13,20 @@ A [Unified Kernel Image (UKI)](https://uapi-group.org/specifications/specs/unifi
 4. System metadata (`os-release`)
 5. Optional firmware splash / boot logos
 
-Because UEFI firmware can directly load and execute PE binaries, a UKI allows firmware to boot Linux directly without intermediate bootloaders like GRUB, while providing an ideal basis for Secure Boot and measured boot workflows.
+Because UEFI firmware can directly load and execute PE binaries, a UKI allows firmware to boot Linux directly without intermediate bootloaders like GRUB, while providing an ideal basis for Secure Boot, measured boot, and TPM2-sealed workflows.
+
+---
+
+## Core Architectural Guarantees
+
+RustyUKI enforces defensive system engineering principles:
+- **Clean 3-Way Decoupling**: UKI generation, UKI installation, and boot activation are strictly separate operations with isolated failure modes.
+- **Dual Boot Backends**: Supports **Direct UEFI** firmware execution via `efibootmgr` (preferred) and **systemd-boot** Type #2 UKI discovery under `/EFI/Linux/`.
+- **Multi-Stage Health Assessment**: Protects against false confirmations by ensuring userspace reaches its target before promoting boot entries.
+- **Instant Rollback Slots**: Preserves existing working UKIs in `linux-<version>.prev.efi` fallback slots.
+- **Sidecar Provenance Tracking**: Inspects `linux-<version>.efi.manifest.json` before pruning, preventing accidental deletion of foreign or unmanaged UKIs.
+- **Kernel Flavor Compatibility**: Supports Fedora stock kernels (`kernel-core`), CachyOS kernels (`kernel-cachyos-lto`), and generic RPM variants.
+- **Offline Sysroot Support**: Supports `--sysroot` for building disk images and offline roots without touching host NVRAM or EFI variables.
 
 ---
 
@@ -23,19 +36,10 @@ The documentation is organized into focused guides:
 
 | Guide | Description |
 |---|---|
-| [**Architecture & Pipeline**](./architecture.md) | How RustyUKI works under the hood: the 2-stage build pipeline (`dracut` + `ukify`), atomic write mechanisms, and EFI entry registration. |
-| [**CLI Reference**](./cli.md) | Exhaustive reference for all commands (`status`, `generate`, `install`, `reconcile`, `confirm`, `install-hook`), flags, overrides, and exit codes. |
-| [**Configuration Guide**](./configuration.md) | Detailed documentation of `/etc/uki/uki.conf`, cmdline auto-detection hierarchy, metadata caching, and hardware tailoring. |
-| [**Boot Safety & Trial Workflow**](./boot-flow-and-safety.md) | The fail-safe trial boot flow (`BootNext`), `rustyuki-boot-confirm.service`, GPT partition autodiscovery advisory, and ESP preflight validation checks. |
-| [**Automated Kernel Hook**](./kernel-hook.md) | Automatic kernel updates via Fedora's `kernel-install` plugin system (`90-rustyuki.install`), lifecycle triggers, and multi-kernel reconciliation. |
-| [**Backups & Emergency Recovery**](./recovery.md) | Pre-installation backups, troubleshooting unbootable states, Live USB rescue procedures, and restoring legacy GRUB boot entries. |
-| [**Packaging & CI/CD**](./packaging-and-ci.md) | RPM spec packaging, automated nightly GitHub Releases via GitHub Actions, and containerized CI checks. |
-
----
-
-## Quick Navigation
-
-- Looking for a safe step-by-step first-boot guide? Read [Boot Safety & Trial Workflow](./boot-flow-and-safety.md).
-- Need to configure custom dracut modules or ukify flags? Read [Configuration Guide](./configuration.md).
-- Want hands-off UKI builds on `dnf update kernel`? Read [Automated Kernel Hook](./kernel-hook.md).
-- System not booting or stuck in EFI menu? Read [Backups & Emergency Recovery](./recovery.md).
+| [**Architecture & Pipeline**](./architecture.md) | Three-stage decoupled pipeline (generation, installation, activation), FAT32 durability, and dual boot backends. |
+| [**CLI Reference**](./cli.md) | Exhaustive reference for all commands (`status`, `generate`, `install`, `activate`, `rollback`, `reconcile`, `confirm`, `install-hook`). |
+| [**Configuration Guide**](./configuration.md) | Detailed documentation of `/etc/rustyuki/config.toml`, backend selection, Secure Boot signing, and cmdline preservation. |
+| [**Boot Safety & Trial Workflow**](./boot-flow-and-safety.md) | Fail-safe trial boot flow (`BootNext`), late-userspace health assessment, FAT durability, and fallback slot management. |
+| [**Automated Kernel Hook**](./kernel-hook.md) | Automatic kernel updates via Fedora's `kernel-install` plugin system (`90-rustyuki.install`), failure registry, and multi-kernel reconciliation. |
+| [**Backups & Emergency Recovery**](./recovery.md) | Pre-installation backups, instant rollback commands, diagnostic matrix, and Live USB recovery runbooks. |
+| [**Packaging & CI/CD**](./packaging-and-ci.md) | RPM spec packaging targeting Fedora 44 and Fedora 45, containerized CI checks, and automated smoke testing. |

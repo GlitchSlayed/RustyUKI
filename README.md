@@ -2,12 +2,12 @@
 
 # RustyUKI
 
-**A Rust-native CLI for building and installing Unified Kernel Images on Fedora-based systems.**
+**A reliable, distribution-independent Unified Kernel Image lifecycle manager for Linux.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
 [![Rust](https://img.shields.io/badge/Built%20with-Rust-orange?logo=rust)](https://www.rust-lang.org/)
-[![Platform](https://img.shields.io/badge/Platform-Fedora%20%7C%20Nobara-lightblue?logo=fedora)](https://fedoraproject.org/)
-[![Status](https://img.shields.io/badge/Status-Pre--release-red)]()
+[![Platform](https://img.shields.io/badge/Platform-Fedora%2044%20%7C%2045%20%7C%20CachyOS-lightblue?logo=fedora)](https://fedoraproject.org/)
+[![Status](https://img.shields.io/badge/Status-Rehabilitated%20v0.2.0-green)]()
 [![UEFI Only](https://img.shields.io/badge/Firmware-UEFI%20Only-purple)]()
 
 </div>
@@ -15,55 +15,102 @@
 ---
 
 > [!CAUTION]
-> **RustyUKI modifies your EFI System Partition and boot entries. A misconfigured or failed build can leave your system completely unbootable.**
+> **RustyUKI modifies your EFI System Partition and boot entries. A misconfigured build or invalid NVRAM write can impact system availability.**
 >
-> - This is **pre-release software** under active development — not yet production-ready.
-> - You **must** prepare a recovery method before running any command. See [§ Backups & Recovery](#%EF%B8%8F-backups--recovery).
-> - **Never** run this on a machine you cannot physically access or recover via live USB.
-> - Always preview changes with `--dry-run` before executing.
+> - Always preview operations with `--dry-run` before applying changes.
+> - Ensure you have access to a working Live USB or alternate bootloader. See [Backups & Emergency Recovery](./docs/recovery.md).
+> - RustyUKI automatically preserves `.prev.efi` fallback slots and arms one-shot trial boots (`BootNext` / `set-oneshot`) to prevent locking machines out.
 
 ---
 
 ## Table of Contents
 
 - [What is RustyUKI?](#what-is-rustyuki)
+- [Architectural Design](#architectural-design)
+- [Key Features](#key-features)
 - [Documentation](#documentation)
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Configuration](#configuration)
-- [Usage](#usage)
-- [Safer First Boot Workflow](#safer-first-boot-workflow)
-- [Example Workflow](#example-workflow)
-- [⚠️ Backups & Recovery](#%EF%B8%8F-backups--recovery)
-- [⚠️ Warnings & Known Failure Modes](#%EF%B8%8F-warnings--known-failure-modes)
-- [Pre-flight Checklist](#pre-flight-checklist)
-- [Project Structure](#project-structure)
-- [Inspiration & Credits](#inspiration--credits)
-- [Roadmap](#roadmap)
-- [Contributing](#contributing)
+- [Command Reference](#command-reference)
+- [Safe First Boot Workflow](#safe-first-boot-workflow)
+- [Backups & Recovery](#backups--recovery)
+- [Contributing & Testing](#contributing--testing)
 - [License](#license)
 
 ---
 
 ## What is RustyUKI?
 
-RustyUKI builds and installs [Unified Kernel Images (UKIs)](https://uapi-group.org/specifications/specs/unified_kernel_image/) using a two-stage pipeline:
+RustyUKI builds, verifies, installs, and manages the lifecycle of [Unified Kernel Images (UKIs)](https://uapi-group.org/specifications/specs/unified_kernel_image/).
 
-1. **`dracut`** — generates the initramfs
-2. **`ukify`** — assembles the final PE/EFI binary
+A UKI combines:
+1. **Linux kernel** (`vmlinuz`)
+2. **Initramfs** (`dracut`)
+3. **Kernel command line** (`cmdline`)
+4. **Distribution metadata** (`os-release`)
+5. **Optional boot splash logo**
 
-The resulting UKI is a single self-contained EFI executable that bundles your kernel, initramfs, and kernel command line — allowing the UEFI firmware to boot directly into Linux, bypassing GRUB entirely.
+Because UEFI firmware can directly execute PE/COFF binaries, a UKI allows firmware to boot Linux directly without intermediate bootloaders, simplifying the boot chain and providing a unified boundary for Secure Boot signing.
 
-**Benefits over GRUB:**
+> [!NOTE]
+> Eliminating intermediate bootloader stages simplifies the boot chain, but overall boot duration is dominated by firmware initialization, kernel hardware discovery, initramfs execution, and userspace startup. Performance benefits should be measured rather than assumed.
 
-| Feature | GRUB | UKI (RustyUKI) |
-|---|---|---|
-| Boot chain stages | 2+ (GRUB → kernel) | 1 (UEFI → kernel) |
-| Secure Boot | Complex, per-binary | Single signed blob |
-| Boot management | `grub-mkconfig` | `bootctl` / `efibootmgr` |
-| Reproducibility | Config-dependent | Atomic, versioned artifacts |
+---
 
-Also.........Huge theoretical boot speed improvements.
+## Architectural Design
+
+Unlike early prototype scripts that combine compilation, partition writing, and NVRAM modifications into one fragile step, RustyUKI enforces a strict **three-stage decoupled architecture**:
+
+```mermaid
+flowchart LR
+    subgraph S1["1. Generation"]
+        direction TB
+        dracut --> ukify --> signing --> inspect
+    end
+
+    subgraph S2["2. Installation"]
+        direction TB
+        sync_all --> backup_slot --> atomic_rename --> manifest
+    end
+
+    subgraph S3["3. Activation"]
+        direction TB
+        direct_uefi["Direct UEFI (efibootmgr)"]
+        sd_boot["systemd-boot (bootctl)"]
+    end
+
+    S1 --> S2 --> S3
+```
+
+1. **Stage 1: UKI Generation (Isolated Staging)**
+   Compiles initramfs (`dracut`), assembles the PE binary (`ukify`), optionally signs for Secure Boot (`pesign`/`sbsign`), and inspects DOS/PE magic headers and hashes. Everything occurs inside an isolated staging directory without touching ESP or firmware variables.
+2. **Stage 2: UKI Installation (ESP Storage & Durability)**
+   Validates >=50MB free ESP capacity, performs durable writes with explicit `sync_all()`, archives existing UKIs to `.prev.efi` fallback slots, executes atomic renames, and writes sidecar provenance manifests (`.manifest.json`).
+3. **Stage 3: Boot Activation (Pluggable Backends)**
+   Manages bootloader entries via **Direct UEFI** (`efibootmgr`) or **systemd-boot** (`bootctl`). Supports safe one-shot trial booting (`BootNext` or `set-oneshot`).
+
+---
+
+## Key Features
+
+- **Dual Boot Backends**:
+  - **Direct UEFI** (preferred): Firmware executes UKIs directly. Manages NVRAM entries, avoids duplicates, and arms `BootNext`.
+  - **systemd-boot**: Supports Type #2 UKIs under `/EFI/Linux/`, `bootctl update`, and `systemd-bless-boot`.
+- **Multi-Stage Health Assessment**:
+  Prevents premature boot confirmation. `rustyuki confirm` verifies that userspace reached target operational status via `systemctl is-system-running`. Refuses confirmation if in `emergency`, `rescue`, or `maintenance` mode.
+- **Fallback Slots (`.prev.efi`) & Rollback**:
+  Existing working UKIs are automatically retained in backup slots. Run `sudo rustyuki rollback` to instantly restore a previous kernel.
+- **Provenance Tracking & Foreign UKI Protection**:
+  Inspects sidecar manifests (`.manifest.json`) before deleting any files. Never touches foreign or unmanaged UKIs.
+- **Kernel Flavor Support**:
+  Supports Fedora stock kernels (`kernel-core`), CachyOS high-performance kernels (`kernel-cachyos-lto`), and generic RPM packages.
+- **Offline Image Building (`--sysroot`)**:
+  Builds UKIs into disk images or sysroots without leaking into host `/proc`, `/sys`, or host UEFI NVRAM.
+- **Accurate Command-Line Preservation**:
+  Strips only `BOOT_IMAGE=` and `initrd=`, strictly preserving user driver blacklists (`rd.driver.blacklist=*`) and complex storage layers (LUKS, LVM, btrfs subvolumes).
+- **Failure Registry in `kernel-install`**:
+  Records failed builds persistently under `/var/lib/uki-build/pending-failures/` without breaking package manager transactions.
 
 ---
 
@@ -73,550 +120,142 @@ Full in-depth documentation is available in the [`docs/`](./docs/) directory:
 
 | Guide | Description |
 |---|---|
-| [**Architecture & Pipeline**](./docs/architecture.md) | Two-stage build pipeline (`dracut` + `ukify`), atomic write guarantees, and UEFI NVRAM registration. |
-| [**CLI Reference**](./docs/cli.md) | Exhaustive command, flag, argument, override, and exit code reference. |
-| [**Configuration Guide**](./docs/configuration.md) | `/etc/uki/uki.conf` schema, cmdline auto-detection hierarchy, and metadata caching. |
-| [**Boot Safety & Trial Workflow**](./docs/boot-flow-and-safety.md) | Fail-safe `BootNext` trial booting, `rustyuki-boot-confirm.service`, and GPT autodiscovery advisory. |
-| [**Automated Kernel Hook**](./docs/kernel-hook.md) | Hands-off `kernel-install` plugin integration for `dnf update kernel` triggers. |
-| [**Backups & Emergency Recovery**](./docs/recovery.md) | Pre-installation backups, Live USB rescue procedures, and restoring legacy GRUB entries. |
-| [**Packaging & CI/CD**](./docs/packaging-and-ci.md) | RPM spec packaging, automated nightly GitHub Releases, and containerized CI checks. |
+| [**Architecture & Pipeline**](./docs/architecture.md) | Three-stage decoupled pipeline, FAT32 durability, and dual boot backends. |
+| [**CLI Reference**](./docs/cli.md) | Exhaustive reference for all subcommands, options, and exit codes. |
+| [**Configuration Guide**](./docs/configuration.md) | `/etc/rustyuki/config.toml` schema, Secure Boot signing, and backend selection. |
+| [**Boot Safety & Trial Workflow**](./docs/boot-flow-and-safety.md) | Fail-safe trial boot flow (`BootNext`), late-userspace health assessment, and fallback slots. |
+| [**Automated Kernel Hook**](./docs/kernel-hook.md) | Hands-off `kernel-install` plugin integration (`90-rustyuki.install`) with failure registry. |
+| [**Backups & Emergency Recovery**](./docs/recovery.md) | Instant rollback commands, pre-flight backups, diagnostic matrix, and Live USB runbooks. |
+| [**Packaging & CI/CD**](./docs/packaging-and-ci.md) | RPM spec packaging targeting Fedora 44 and Fedora 45, containerized CI checks, and smoke tests. |
 
 ---
 
 ## Requirements
 
-> [!IMPORTANT]
-> RustyUKI is **UEFI-only**. It will not work on systems with legacy BIOS firmware. Do not attempt to run it on a BIOS system.
-
-- Fedora Linux (or a Fedora-based distro — Nobara support in progress, see [Roadmap](#roadmap))
-- `dracut` installed and functional
-- `ukify` (`systemd-ukify`) available on `$PATH`
-- UEFI firmware with a mounted EFI System Partition (ESP)
-- Rust toolchain (`cargo`) to build from source
-
-Verify your dependencies before proceeding:
-
-```bash
-which dracut && dracut --version
-which ukify && ukify --version
-mount | grep -i efi
-```
+- **Firmware**: UEFI only (legacy BIOS is not supported).
+- **OS**: Fedora 44+, Fedora 45+, CachyOS, or any modern Linux system using systemd.
+- **Required Packages**:
+  - `dracut`
+  - `systemd-ukify` (or `systemd` with ukify)
+  - `efibootmgr` (for Direct UEFI backend)
+  - `systemd-boot` (for systemd-boot backend)
+  - `binutils`
+- **Optional Packages**:
+  - `sbsign` or `pesign` (for Secure Boot signing)
 
 ---
 
 ## Installation
 
-### Option 1 — Install via automated nightly RPM (Recommended for Fedora 44 & 45)
+### From RPM Package (Recommended on Fedora)
 
-Automated nightly RPM builds for the latest Fedora releases (**Fedora 44** and **Fedora 45**) are published via GitHub Releases on every update:
+Pre-built RPM packages are available from GitHub Actions CI releases:
 
 ```bash
-# Download the latest RPM from GitHub Releases for your Fedora release:
-# https://github.com/GlitchSlayed/RustyUKI/releases
-sudo dnf install https://github.com/GlitchSlayed/RustyUKI/releases/download/rpm-nightly-YYYYMMDD/rustyuki-0.2.0-1.fc45.x86_64.rpm
-# or for Fedora 44:
-# sudo dnf install https://github.com/GlitchSlayed/RustyUKI/releases/download/rpm-nightly-YYYYMMDD/rustyuki-0.2.0-1.fc44.x86_64.rpm
+# Install the package
+sudo dnf install -y rustyuki-0.2.0-1.fc44.x86_64.rpm
 ```
 
-### Option 2 — Build from source
+### From Source
 
 ```bash
 git clone https://github.com/GlitchSlayed/RustyUKI.git
 cd RustyUKI
-cargo build --release
-sudo cp target/release/rustyuki /usr/local/bin/
+cargo build --release --locked
+sudo install -Dpm0755 target/release/rustyuki /usr/bin/rustyuki
+sudo install -Dpm0644 packaging/config.toml /etc/rustyuki/config.toml
 ```
-
-### Verify
-
-```bash
-rustyuki --version
-# rustyuki 0.2.0
-```
-
-### Activate automatic UKI rebuilds on kernel updates
-```bash
-sudo rustyuki install-hook
-```
-
-This installs a `kernel-install` plugin at `/usr/lib/kernel/install.d/90-rustyuki.install`. After this, every `dnf update kernel` or kernel package transaction will automatically rebuild or prune your UKIs without any manual intervention. See [Automated Kernel Updates](./docs/kernel-hook.md) for details.
 
 ---
 
 ## Configuration
 
-RustyUKI reads from a TOML config file at `/etc/uki/uki.conf` by default. Override the path with `--config <PATH>`.
-
-```bash
-sudo mkdir -p /etc/uki
-sudo nano /etc/uki/uki.conf
-```
-
-### Full config reference
+Configuration is located at `/etc/rustyuki/config.toml`:
 
 ```toml
 [uki]
-# Kernel version to build for. Defaults to `uname -r` if left empty.
-kernel_version = ""
-
-# Path to your EFI System Partition mountpoint
-esp_path = "/boot/efi"
-
-# Directory where the final .efi UKI will be written
-output_dir = "/boot/efi/EFI/Linux"
-
-# File containing kernel command line parameters — must not be empty
+output_dir = "/efi/EFI/Linux"
+esp_path = "/efi"
+auto_detect_cmdline = true
 cmdline_file = "/etc/kernel/cmdline"
 
-# Fallback cmdline when auto detection cannot find a usable value
-configured_cmdline = "root=UUID=REPLACE-ME rw quiet rhgb"
+[bootloader]
+backend = "direct"       # "direct" or "systemd-boot"
+trial_boot = true        # Arm one-shot trial on install
+keep_backup = true       # Retain .prev.efi fallback slot
+prune_stale_images = true
 
-# Enable cmdline auto-detection from /proc/cmdline, then cmdline_file
-auto_detect_cmdline = true
-
-# Metadata directory for detected cmdline state
-cmdline_state_dir = "/var/lib/uki-build"
-
-# Warn if cmdline has fewer tokens than this
-cmdline_min_tokens = 3
-
-# Optional: path to a splash/logo image to embed
-splash = ""
-
-# OS release metadata file
-os_release = "/etc/os-release"
-
-[dracut]
-# Additional arguments passed directly to dracut
-extra_args = []
-
-[ukify]
-# Additional arguments passed directly to ukify
-extra_args = []
-```
-
-> [!TIP]
-> CLI flags always override config file values. Use `sudo rustyuki status` to inspect the resolved effective configuration before building.
-
----
-
-## Usage
-
-```
-rustyuki [OPTIONS] <COMMAND>
-```
-
-### Global options
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--config <PATH>` | `/etc/uki/uki.conf` | Path to config file |
-| `--dry-run` | — | Print commands without executing |
-| `-v` | — | Enable DEBUG logging |
-| `-vv` | — | Enable TRACE logging |
-
-### Subcommands
-
-#### `status` — Inspect resolved runtime configuration & boot environment
-
-Prints the effective config after merging the config file and CLI overrides, and inspects your root partition to advise if GPT autodiscovery (Discoverable Partitions Specification) makes `root=` in your cmdline redundant. **Run this first before every build.**
-
-```bash
-sudo rustyuki status
-```
-
-#### `generate` — Build a UKI and register an EFI boot entry
-
-Runs the full two-stage pipeline:
-
-1. Invokes `dracut` to produce an initramfs
-2. Invokes `ukify` to assemble the final `.efi` PE binary
-3. Registers an EFI boot entry via `efibootmgr`
-
-Output is written atomically (temp file → rename) to prevent partial writes from corrupting an existing working image.
-
-```bash
-sudo rustyuki generate
-sudo rustyuki generate --kernel-version "$(uname -r)"
-sudo rustyuki generate --boot-once
-sudo rustyuki generate --dry-run   # preview only
-```
-
-Use `--boot-once` when you want firmware to trial the new UKI exactly once via `efibootmgr --bootnext` before you make it permanent with `rustyuki confirm`.
-
-#### `install` — Generate and sync the ESP
-
-`install` now always uses a trial-boot flow:
-
-1. Generates and registers the UKI entry without rewriting permanent `BootOrder`
-2. Sets the new entry as `BootNext` (one-time next boot)
-3. Installs/enables `rustyuki-boot-confirm.service`
-4. Runs `bootctl update` to synchronise the ESP
-
-```bash
-sudo rustyuki install
-sudo rustyuki install --kernel-version "6.17.4-100.fc44.x86_64"
-```
-
-Use `generate --boot-once` if you want one-time trial semantics without running `bootctl update`.
-
-#### `reconcile` — Rebuild all installed kernel UKIs and prune stale artifacts
-
-Rebuilds UKIs for every kernel reported by `rpm -q kernel`, prunes stale `linux-*.efi` entries in the output directory, and runs `bootctl update`.
-
-```bash
-sudo rustyuki reconcile
-```
-
-#### `confirm` — Make a successful trial boot permanent
-
-After booting the one-time UKI successfully, `rustyuki-boot-confirm.service` runs automatically early in userspace and calls `rustyuki confirm`. `confirm` reads `BootCurrent`, moves that entry to the front of `BootOrder`, and clears `BootNext`.
-
-```bash
-sudo rustyuki confirm
-```
-
-#### `install-hook` — Run reconcile automatically on kernel updates
-
-Installs a `kernel-install` plugin so `rustyuki reconcile` runs on kernel add/remove events.
-
-```bash
-sudo rustyuki install-hook
+[signing]
+enabled = false
+tool = "sbsign"          # "sbsign" or "pesign"
+cert_path = "/etc/pki/sb/db.crt"
+key_path = "/etc/pki/sb/db.key"
 ```
 
 ---
 
-## Safer First Boot Workflow
+## Command Reference
 
-For first-time GRUB replacement or any risky UKI change, prefer a one-time boot trial instead of immediately changing your permanent firmware boot order.
+| Subcommand | Description |
+|---|---|
+| `rustyuki status` | Display current runtime configuration, boot backend, discovered kernels, and installed UKIs. |
+| `rustyuki generate` | Build UKI in isolated staging without modifying ESP or NVRAM. |
+| `rustyuki install` | Build, durable-install to ESP, create `.prev.efi`, write manifest, and arm trial boot. |
+| `rustyuki activate` | Activate bootloader entry for an installed UKI (with optional `--boot-once`). |
+| `rustyuki rollback` | Atomically restore `linux-<version>.prev.efi` over `linux-<version>.efi`. |
+| `rustyuki reconcile` | Synchronize UKIs for all installed kernels and prune stale artifacts. |
+| `rustyuki install-hook` | Install `kernel-install` plugin for automatic kernel package lifecycle management. |
+| `rustyuki confirm` | Assess system health and finalize the trial UKI as permanent default boot entry. |
+
+---
+
+## Safe First Boot Workflow
+
+1. **Check Environment Status**:
+   ```bash
+   sudo rustyuki status
+   ```
+2. **Perform a Dry Run**:
+   ```bash
+   sudo rustyuki install --dry-run
+   ```
+3. **Install with Fail-Safe Trial Boot**:
+   ```bash
+   sudo rustyuki install
+   ```
+4. **Reboot the System**:
+   ```bash
+   sudo reboot
+   ```
+   - If the new UKI boots successfully into a normal healthy userspace target, `rustyuki-boot-confirm.service` verifies system health and promotes the entry permanently.
+   - If the UKI fails to boot, freeze, or panic, simply reset the machine. The firmware falls back to your previous working bootloader or prior kernel entry.
+
+---
+
+## Backups & Recovery
+
+If an installed UKI experiences regressions:
+```bash
+# Instant rollback to previous working build
+sudo rustyuki rollback --kernel-version <version>
+```
+
+For full emergency recovery instructions and Live USB procedures, see [Backups & Emergency Recovery](./docs/recovery.md).
+
+---
+
+## Contributing & Testing
+
+Run unit tests, integration tests, and formatting checks:
 
 ```bash
-# Build the UKI, refresh the ESP, and schedule it for the next boot only
-sudo rustyuki install
-
-# Reboot normally; firmware will use BootNext exactly once
-sudo reboot
-
-# Optional manual confirmation (normally done automatically by systemd service)
-sudo rustyuki confirm
-```
-
-This workflow keeps your existing default entry in `BootOrder` as the fallback if the trial boot fails, while still letting you verify the UKI end-to-end before committing to it.
-
-## Example Workflow
-
-> [!WARNING]
-> Do not skip steps 1 and 2. Running `install` without first verifying your config and doing a dry run is the most common cause of broken boot entries.
-
-```bash
-# Step 1 — inspect resolved config
-sudo rustyuki status
-
-# Step 2 — dry run: see every command that will execute, without running anything
-sudo rustyuki generate --dry-run
-
-# Step 3 — build and schedule a one-time trial boot
-sudo rustyuki install
-
-# Step 4 — reboot normally and let BootNext test the UKI once
-sudo reboot
-
-# Step 5 — optional manual confirmation (auto-confirm service handles this on success)
-sudo rustyuki confirm
-```
-
-After booting into the UKI, verify it was used:
-
-```bash
-bootctl status
-cat /proc/cmdline   # should match /etc/kernel/cmdline exactly
-```
-
----
-
-## ⚠️ Backups & Recovery
-
-> [!CAUTION]
-> **Do not skip this section.** Bootloader misconfiguration is one of the few failure modes that can leave a Linux system completely unreachable without physical intervention. Spend 10 minutes preparing before you touch anything.
-
-### Step 1 — Prepare a live USB
-
-> [!IMPORTANT]
-> Have a **Fedora live USB** ready and **verified bootable** before running RustyUKI for the first time. If a broken UKI is installed and your system refuses to boot, a live USB is your only recovery path short of reinstalling.
-
-Download: https://fedoraproject.org/workstation/download
-
-Boot the USB now and confirm it reaches the desktop **before** you need it in an emergency.
-
----
-
-### Step 2 — Back up your EFI System Partition
-
-```bash
-# Identify your ESP partition
-lsblk -o NAME,PARTTYPE,MOUNTPOINT | grep -i efi
-
-# Archive the entire ESP
-sudo tar -czvf ~/esp-backup-$(date +%Y%m%d).tar.gz /boot/efi/
-```
-
-> [!CAUTION]
-> A backup stored only on the machine you are about to modify is not a backup. **Copy it to a USB drive or external storage before proceeding.**
-
----
-
-### Step 3 — Back up your EFI boot entries
-
-```bash
-# Dump all current boot entries
-efibootmgr -v > ~/efibootmgr-backup-$(date +%Y%m%d).txt
-
-# Confirm the dump looks correct
-cat ~/efibootmgr-backup-$(date +%Y%m%d).txt
-```
-
----
-
-### Step 4 — Back up and verify your kernel cmdline
-
-> [!WARNING]
-> RustyUKI **bakes the kernel command line into the UKI at build time**. A wrong or empty `cmdline_file` will produce a UKI that builds without errors but **fails to boot** — most commonly dropping to an emergency shell because `root=` is missing or points to a wrong UUID.
-
-```bash
-# Back up the cmdline file
-cp /etc/kernel/cmdline ~/cmdline-backup-$(date +%Y%m%d).txt
-
-# Diff against what your system actually booted with
-diff <(cat /etc/kernel/cmdline) <(cat /proc/cmdline)
-```
-
-If the diff is non-empty, resolve the discrepancy before building. Verify your `root=UUID=...` value:
-
-```bash
-# Find the correct UUID for your root partition
-findmnt -n -o UUID /
-
-# Cross-check with blkid
-blkid | grep -E 'TYPE="(ext4|btrfs|xfs)"'
-```
-
----
-
-### Step 5 — Recovery procedure from a live USB
-
-<details>
-<summary><strong>▶ Click to expand: How to recover from a broken boot</strong></summary>
-
-Boot your Fedora live USB, open a terminal, and run:
-
-```bash
-# 1. Identify your ESP partition
-lsblk -o NAME,FSTYPE,PARTTYPE,SIZE,MOUNTPOINT
-
-# 2. Mount the ESP
-sudo mkdir -p /mnt/efi
-sudo mount /dev/sdXY /mnt/efi   # replace sdXY with your actual ESP partition
-
-# Option A — Restore ESP from backup (recommended)
-sudo tar -xzvf /path/to/esp-backup-YYYYMMDD.tar.gz -C /
-
-# Option B — Manually re-register a GRUB boot entry
-sudo efibootmgr --create \
-  --disk /dev/sdX \
-  --part Y \
-  --label "Fedora" \
-  --loader "\EFI\fedora\grubx64.efi"
-
-# 3. Verify entries were restored
-efibootmgr -v
-
-# 4. Remove a bad UKI entry if needed
-efibootmgr -b XXXX -B   # replace XXXX with the entry number to delete
-```
-
-</details>
-
----
-
-### Step 6 — Do not remove GRUB prematurely
-
-> [!WARNING]
-> **Keep GRUB intact until your UKI has booted successfully at least once.** RustyUKI registers a new EFI boot entry alongside your existing entries — it does not remove GRUB. Use your firmware's one-time boot menu to select the UKI entry for testing without changing the default boot order.
-
----
-
-## ⚠️ Warnings & Known Failure Modes
-
-### Things that will prevent booting
-
-> [!CAUTION]
-
-| Situation | Effect |
-|-----------|--------|
-| Wrong `root=` UUID in cmdline | UKI boots, cannot find root filesystem → drops to emergency shell |
-| Empty or missing `cmdline_file` | UKI built with no kernel parameters → almost certainly won't boot |
-| ESP not mounted or read-only | Build fails mid-pipeline or writes to wrong path |
-| GRUB removed before UKI verified | No fallback if UKI doesn't boot |
-| Legacy BIOS firmware | Not supported — do not attempt |
-| Target kernel not installed | dracut fails or produces invalid initramfs |
-| Wrong kernel version targeted | Initramfs / kernel mismatch → kernel panic at boot |
-
-### Silent failures — build succeeds but system won't boot
-
-> [!WARNING]
-
-- **`/etc/kernel/cmdline` exists but is empty** — dracut and ukify succeed, UKI boots with no parameters. Always verify with `cat /etc/kernel/cmdline`.
-- **`ukify` not on `$PATH`** — dracut stage succeeds, second stage crashes. ESP is unchanged but temp artifacts may linger in `/tmp`.
-- **Secure Boot enabled without a signed UKI** — firmware silently refuses to load the binary. Disable Secure Boot or wait for signing support (see [Roadmap](#roadmap)).
-- **Multiple kernels installed, wrong version targeted** — always verify `sudo rustyuki status` shows the intended kernel version.
-- **Insufficient ESP free space** — UKIs are typically 50–150 MB. A failed write may leave a zero-byte or corrupt `.efi` file in the output directory.
-
----
-
-## Pre-flight Checklist
-
-> [!TIP]
-> Run this before every `generate` or `install`. Save it as a local script if you use RustyUKI frequently.
-
-```bash
-#!/usr/bin/env bash
-echo "=== RustyUKI Pre-flight Check ==="
-
-echo -n "[1] ESP writable ......... "
-touch /boot/efi/.rustyuki-write-test 2>/dev/null \
-  && rm /boot/efi/.rustyuki-write-test \
-  && echo "✓ OK" \
-  || echo "✗ FAIL — mount your ESP first"
-
-echo -n "[2] cmdline populated .... "
-[[ -s /etc/kernel/cmdline ]] \
-  && echo "✓ OK  ($(cat /etc/kernel/cmdline))" \
-  || echo "✗ FAIL — /etc/kernel/cmdline is empty or missing"
-
-echo -n "[3] dracut on PATH ....... "
-command -v dracut &>/dev/null \
-  && echo "✓ OK  ($(dracut --version 2>&1 | head -1))" \
-  || echo "✗ FAIL — install dracut"
-
-echo -n "[4] ukify on PATH ........ "
-command -v ukify &>/dev/null \
-  && echo "✓ OK" \
-  || echo "✗ FAIL — install systemd-ukify"
-
-echo    "[5] Running kernel ....... $(uname -r)"
-
-echo -n "[6] ESP free space ....... "
-df -h /boot/efi | awk 'NR==2 {print $4 " available on " $6}'
-
-echo "==================================="
-echo "Run 'sudo rustyuki status' to verify target kernel version."
-```
-
----
-
-## Project Structure
-
-```
-RustyUKI/
-├── docs/                 # Detailed guides and architecture documentation
-├── src/                  # Rust source
-├── tests/                # Integration tests
-├── .github/
-│   ├── rpm/              # Fedora RPM spec file
-│   └── workflows/        # CI and automated RPM release workflows
-├── Cargo.toml
-└── README.md
-```
-
-> [!NOTE]
-> Legacy shell-script implementation has been removed; all supported behavior now lives in the Rust CLI.
-
----
-
-## Inspiration & Credits
-
-RustyUKI is its own Rust-native implementation, but the project is heavily informed by existing Fedora and Secure Boot tooling. Credit where it is due:
-
-- **[kraxel/fedora-uki](https://github.com/kraxel/fedora-uki)** — strong reference point for Fedora-oriented UKI workflows, `kernel-install` integration, tentative boot entry handling, and broader production hardening ideas.
-- **[rhboot/nmbl-builder](https://github.com/rhboot/nmbl-builder)** — inspiration for EFI boot entry management, Secure Boot signing flows, rollback-minded installation patterns, and practical builder ergonomics.
-- **[dracut](https://github.com/dracutdevs/dracut)** — RustyUKI relies on `dracut` to generate initramfs images.
-- **[systemd ukify / bootctl](https://github.com/systemd/systemd)** — `ukify` assembles the final UKI and `bootctl` is used for ESP synchronization where appropriate.
-- **[`efibootmgr`](https://github.com/rhboot/efibootmgr)** — used for EFI boot entry creation and inspection.
-
-These projects and tools shaped both the current implementation and the roadmap below.
-
----
-
-## Roadmap
-
-> [!NOTE]
-> The roadmap below incorporates ideas derived from comparing RustyUKI against **kraxel/fedora-uki** and **rhboot/nmbl-builder**, alongside features already planned for RustyUKI itself. Shipped items were moved out so this section only tracks work that is still open.
-
-### Recently shipped
-
-- **Comprehensive Documentation Suite** — fully documented `/docs` covering architecture, CLI commands, configuration schema, boot trial workflow, kernel hooks, and emergency recovery.
-- **BootNext trial boot workflow** — `--boot-once` and `rustyuki install` schedule a one-time trial boot, and `rustyuki confirm` (via `rustyuki-boot-confirm.service`) promotes the entry upon verified boot.
-- **ESP preflight validation** — generation checks mount presence, read-only status, available space (<50MB abort, <150MB warn), and output directory writability.
-- **GPT autodiscovery advisory** — `rustyuki status` inspects root partition type GUIDs against UAPI DPS standards and warns if `root=` in cmdline is redundant.
-- **Fedora `kernel-install` hook support** — RustyUKI installs a plugin so kernel add/remove events trigger targeted UKI generation on adds and reconciliation on removals automatically.
-- **Multi-kernel reconciliation and stale artifact cleanup** — `rustyuki reconcile` rebuilds installed kernels and prunes stale `linux-*.efi` outputs.
-- **Automated Fedora RPM builds & Nightly Releases** — `.github/rpm/rustyuki.spec` spec file with automated daily GitHub Releases publishing `.rpm` and `.src.rpm` packages.
-- **Clippy and Rustfmt in CI** — automated formatting checks and strict `cargo clippy --all-targets -- -D warnings` enforced across PRs and pushes.
-
-### 1. Safety & Boot Entry Management
-
-- [ ] **Secure Boot cmdline guard** — detect active Secure Boot, warn when cmdline changes require a rebuild/re-sign, and track cmdline hashes beside installed UKIs.
-
-### 2. Fedora Integration
-
-- [ ] **Boot environment awareness in `status`** — surface EFI boot entry details via `kernel-bootcfg --show` when available, with `efibootmgr -v` as a fallback.
-- [ ] **Supported architectures** — keep short-term guards in place for x86_64-only assumptions today, while planning full aarch64 support later.
-- [ ] **Nobara Linux support** — detect Nobara-specific paths and dracut quirks; full pipeline testing.
-
-### 3. Signing & Secure Boot
-
-- [ ] **Secure Boot signing** — integrate `pesign` / `sbsign` into the build pipeline with optional configuration.
-- [ ] **MOK provisioning helper** — add a guided `rustyuki enroll-mok` flow wrapping `efikeygen`, `certutil`, and `mokutil`.
-- [ ] **TPM2 + measured boot** — integrate with `systemd-pcrphase` and PCR-sealed secret workflows.
-- [ ] **UKI signing service** — explore a local signing daemon with audit logging for higher-assurance setups.
-
-### 4. UKI Output & Build Pipeline
-
-- [ ] **Atomic write with rollback slot** — preserve the previous UKI as a `.prev` image and add a `rustyuki rollback` command for recovery.
-- [ ] **Multi-profile UKI support** — allow multiple named build profiles from one config for default, recovery, cloud, or hardware-specific UKIs.
-- [ ] **Rootfs validation and fix-up** — cross-check `root=` against the running system in `status` and add a `rustyuki fix-cmdline` helper.
-- [ ] **Fallback UKI pinning** — protect a designated "last known good" UKI from accidental replacement.
-- [ ] **Automated pre-flight validation** — continue expanding built-in safety checks before every build.
-
-### 5. CI, Packaging & Releases
-
-- [ ] **Pinned Fedora container digests** — pin workflow container images with full SHA256 image digests for ultimate reproducibility.
-
-### 6. UX & Longer-term Ideas
-
-- [ ] **Broader distro support** — explore Arch Linux (with dracut), openSUSE Tumbleweed, and potentially Debian/Ubuntu-family systems via additional backends.
-- [ ] **TUI dashboard** — interactive terminal UI for boot entries, ESP contents, and build history.
-- [ ] **GUI frontend** — desktop application (GTK or Tauri) for non-CLI users.
-
----
-
-## Contributing
-
-Contributions, bug reports, and feature requests are welcome. Please [open an issue](https://github.com/GlitchSlayed/RustyUKI/issues) before submitting a large PR to align on approach first.
-
-```bash
-# Run tests
-cargo test
-
-# Check formatting
-cargo fmt --check
-
-# Lint
-cargo clippy -- -D warnings
+cargo fmt --all --check
+cargo clippy --all-targets -- -D warnings
+cargo test --all-targets --locked
 ```
 
 ---
 
 ## License
 
-MIT — see [LICENSE](./LICENSE) for details.
+Licensed under the [MIT License](./LICENSE).

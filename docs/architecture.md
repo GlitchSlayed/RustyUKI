@@ -1,131 +1,100 @@
 # RustyUKI Architecture & Pipeline
 
-This document explains the internal design of RustyUKI, detailing the two-stage build pipeline, atomic file operations, EFI registration, and component responsibilities.
+This document explains the internal design of RustyUKI, detailing the three-stage decoupled pipeline, atomic durability guarantees, boot backends, health assessment, and component responsibilities.
 
 ---
 
 ## High-Level Overview
 
-RustyUKI replaces complex, multi-stage boot chains (UEFI firmware → GRUB core → GRUB modules → Linux kernel → initramfs) with a direct, single-binary execution path:
+RustyUKI provides a distribution-independent, failure-resistant lifecycle manager for Unified Kernel Images (UKIs).
+
+Instead of treating UKI compilation, installation, and NVRAM boot activation as a single monolithic block, RustyUKI strictly separates them into three independent stages with isolated failure boundaries:
 
 ```mermaid
-flowchart LR
-    subgraph Traditional["Traditional Boot Chain"]
-        direction LR
-        UEFI1["UEFI Firmware"] --> GRUB["GRUB 2"]
-        GRUB --> KERN1["vmlinuz"]
-        GRUB --> INIT1["initramfs.img"]
-        KERN1 & INIT1 --> OS1["Operating System"]
+flowchart TD
+    subgraph Stage1["1. UKI Generation (Isolated Staging)"]
+        direction TB
+        DRACUT["dracut<br/>(initramfs)"] --> UKIFY["ukify<br/>(PE assembly)"]
+        UKIFY --> SIGN["Secure Boot Signing<br/>(pesign / sbsign)"]
+        SIGN --> INSP["PE Verification<br/>(MZ header, size sanity, SHA-256)"]
+        INSP --> ARTIFACT["UkiArtifact<br/>(in staging directory)"]
     end
 
-    subgraph RustyUKIChain["RustyUKI Single-Stage Boot Chain"]
-        direction LR
-        UEFI2["UEFI Firmware"] --> UKI["Unified Kernel Image (.efi)<br/>vmlinuz + initramfs + cmdline + os-release"]
-        UKI --> OS2["Operating System"]
+    subgraph Stage2["2. UKI Installation (ESP Storage & Durability)"]
+        direction TB
+        ESP_CHECK["ESP Preflight Check<br/>(Mount, writability, >=50MB free)"] --> STAGE_WRITE["Staging File Sync<br/>(sync_all)"]
+        STAGE_WRITE --> BACKUP["Fallback Slot Preservation<br/>(.prev.efi)"]
+        BACKUP --> FAT_RENAME["Atomic FAT Directory Rename<br/>+ Parent Dir Sync"]
+        FAT_RENAME --> MANIFEST["Sidecar Provenance Manifest<br/>(.manifest.json)"]
     end
+
+    subgraph Stage3["3. Boot Activation (Backend Pluggable)"]
+        direction TB
+        BACKEND_SEL{"Boot Backend Selection"}
+        BACKEND_SEL -->|Direct UEFI| DIRECT["DirectUefiBackend<br/>- Discover ESP partition<br/>- Deduplicate NVRAM entries<br/>- efibootmgr --create<br/>- BootNext trial / BootOrder"]
+        BACKEND_SEL -->|systemd-boot| SDBOOT["SystemdBootBackend<br/>- Type #2 discovery (/EFI/Linux/)<br/>- bootctl update<br/>- bootctl set-oneshot / set-default"]
+    end
+
+    ARTIFACT --> Stage2
+    Stage2 --> Stage3
 ```
 
 ---
 
-## The Two-Stage Build Pipeline
+## Three-Stage Decoupled Pipeline
 
-When `rustyuki generate` or `rustyuki install` is executed, RustyUKI carries out a coordinated pipeline:
+### Stage 1: UKI Generation
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant CLI as RustyUKI CLI
-    participant Check as ESP Preflight Validation
-    participant Dracut as dracut
-    participant Ukify as ukify (systemd-ukify)
-    participant ESP as EFI System Partition
-    participant EFI as efibootmgr / UEFI NVRAM
+- **Scope**: Completely isolated in local staging storage (default: `/tmp/rustyuki-staging/` or configured staging path). Never touches the EFI System Partition or firmware variables.
+- **Components**:
+  1. **Initramfs Generation (`dracut`)**:
+     Compiles kernel drivers, storage layers (LUKS, LVM, btrfs), and systemd early userspace into an isolated initramfs image. Supports `--sysroot` for offline targets.
+  2. **PE/COFF Assembly (`ukify`)**:
+     Combines the kernel executable (`vmlinuz`), initramfs, normalized command line, `os-release`, and optional boot splash bitmap.
+  3. **Secure Boot Signing**:
+     Optional signing stage using `pesign` (with NSS DB tokens) or `sbsign` (with PEM key/cert pairs).
+  4. **PE Verification (`inspect_pe_artifact`)**:
+     Validates the resulting PE binary: verifies DOS/PE magic header (`MZ`), validates that file size is reasonable and not zero/truncated, and computes cryptographic SHA-256 hash for provenance tracking.
 
-    CLI->>Check: Validate ESP mount, writability, free space (>=50MB)
-    CLI->>CLI: Resolve and sanitize kernel cmdline (/proc, /etc, blkid)
-    CLI->>Dracut: Generate initramfs (/tmp/initramfs-[version].img)
-    Dracut-->>CLI: Return initramfs artifact
-    CLI->>Ukify: ukify build --linux vmlinuz --initrd initramfs --cmdline ... --output .tmp
-    Ukify-->>CLI: Build PE binary in hidden temporary file
-    CLI->>ESP: Atomic rename: .linux-[ver].efi.tmp -> linux-[ver].efi
-    CLI->>EFI: Discover ESP disk/partition (findmnt + lsblk)
-    CLI->>EFI: efibootmgr --create --create-only --label ... --loader ...
-    alt If trial boot (--boot-once or install)
-        CLI->>EFI: efibootmgr --bootnext [entry]
-    end
-```
+### Stage 2: UKI Installation & Durability
 
-### Stage 1: Initramfs Generation (`dracut`)
+- **Scope**: Transfers the validated artifact to the destination ESP directory (`/EFI/Linux/` or configured output directory).
+- **Safety & Durability Guarantees**:
+  - **FAT32 Power-Loss Durability**:
+    Calling `rename()` on FAT32 filesystems is not inherently atomic or durable under sudden power loss. RustyUKI writes the staged binary to `.linux-<version>.efi.tmp`, issues `File::sync_all()` to ensure all data clusters are committed to disk, performs atomic rename, and then invokes `sync_all()` on the parent directory to flush directory cluster entries.
+  - **Fallback Slot Preservation**:
+    If an existing UKI is present at the target path, it is moved to `linux-<version>.prev.efi` before replacement. This ensures a known-working fallback boot artifact remains immediately available if the new UKI fails.
+  - **Sidecar Provenance Manifest**:
+    Every installed UKI is accompanied by a `linux-<version>.efi.manifest.json` file containing metadata: generator version, creation timestamp, SHA-256 hash, cmdline hash, kernel flavor, and backend type.
+  - **Foreign UKI Protection**:
+    Reconciliation and pruning strictly check provenance manifests. RustyUKI **never** deletes unmanaged or foreign UKIs created by other tools or distributions.
 
-- **Binary**: `dracut`
-- **Output Target**: `/tmp/initramfs-<kernel_version>.img`
-- **Arguments**:
-  - `-f`: Force overwrite any existing image in `/tmp`
-  - Output path
-  - Target kernel version string
-  - User-configured extra arguments from `/etc/uki/uki.conf` (`[dracut.extra_args]`)
+### Stage 3: Boot Activation
 
-Dracut compiles the hardware drivers, filesystem modules (e.g., ext4, xfs, btrfs), storage layers (LVM, LUKS encryption), and systemd init scripts required to mount root during early userspace.
+RustyUKI supports two pluggable boot management backends configured via `config.toml` (`[bootloader.backend]`):
 
-### Stage 2: UKI PE/COFF Assembly (`ukify`)
+#### 1. Direct UEFI Backend (`backend = "direct"`)
+Firmware directly executes the UKI without intermediate bootloader code:
+- **Partition Discovery**: Resolves the underlying block device and partition number via `findmnt` and `lsblk`.
+- **Deduplication**: Audits existing NVRAM entries to avoid accumulating duplicate boot entries across kernel updates.
+- **Trial Booting (`BootNext`)**: When trial boot is requested (or during initial installation), RustyUKI arms `BootNext` pointing to the new entry without modifying the default `BootOrder`.
+- **Safe BootOrder Promotion**: During confirmation, the trial entry is promoted to index 0 of `BootOrder` and `BootNext` is cleared.
 
-- **Binary**: `ukify` (provided by `systemd-ukify`)
-- **Inputs**:
-  - Kernel binary: `/lib/modules/<kernel_version>/vmlinuz`
-  - Initramfs: `/tmp/initramfs-<kernel_version>.img`
-  - Normalized command line: derived via cmdline detection hierarchy
-  - OS metadata: `/etc/os-release`
-  - Optional splash image: e.g. `/usr/share/pixmaps/fedora-logo.bmp`
-  - User-configured extra arguments from `/etc/uki/uki.conf` (`[ukify.extra_args]`)
-- **Target Output**: `/boot/efi/EFI/Linux/linux-<kernel_version>.efi`
-
-### Atomic Write Guarantee
-
-Writing a multi-megabyte kernel executable directly onto a FAT32 EFI System Partition carries risk: an interruption (out-of-disk space, power failure, SIGINT) could leave a half-written zero-byte executable in place of a working UKI.
-
-RustyUKI guarantees atomic writes:
-1. `ukify` writes the binary to a hidden temporary sibling file: `.linux-<version>.efi.tmp` in the target directory.
-2. If `ukify` encounters an error, the temporary file is immediately removed.
-3. Once `ukify` exits with status `0`, RustyUKI atomically moves `.linux-<version>.efi.tmp` to `linux-<version>.efi` via filesystem rename.
+#### 2. systemd-boot Backend (`backend = "systemd-boot"`)
+Uses `systemd-boot` to manage and launch Type #2 UKIs:
+- **Type #2 Specification**: Discovers UKIs placed under `/EFI/Linux/`.
+- **Synchronization**: Executes `bootctl update` to ensure bootloader binaries and partition metadata are synchronized.
+- **Trial Booting**: Executes `bootctl set-oneshot <entry>` for one-time trial boots.
+- **Default Promotion**: Promotes default kernel with `bootctl set-default <entry>`.
 
 ---
 
-## EFI Boot Entry Registration
+## Boot Confirmation & Health Assessment
 
-Once the UKI file is safely written to the ESP, RustyUKI registers it into the UEFI NVRAM:
+A major architectural flaw in traditional boot managers is confirming a boot immediately upon reaching early systemd startup. If graphic drivers crash, storage filesystems fail to mount, or the machine falls into emergency mode, an unbootable kernel would be permanently promoted.
 
-1. **ESP Block Device Lookup**:
-   - `findmnt -n -o SOURCE <esp_path>` identifies the underlying device (e.g. `/dev/nvme0n1p1`).
-2. **Disk and Partition Extraction**:
-   - `lsblk -no PKNAME <source>` discovers the parent disk (e.g. `nvme0n1`).
-   - `lsblk -no PARTNUM <source>` determines the partition index (e.g. `1`).
-3. **EFI Loader Path Conversion**:
-   - Paths on UEFI are backslash-delimited and relative to the root of the ESP.
-   - RustyUKI strips the ESP mountpoint prefix (`/boot/efi`) and converts slashes:
-     `/boot/efi/EFI/Linux/linux-6.11.4.efi` $\rightarrow$ `\EFI\Linux\linux-6.11.4.efi`
-4. **Non-Destructive Entry Creation**:
-   - RustyUKI executes `efibootmgr` with `--create --create-only`.
-   - `--create-only` creates the boot entry without automatically placing it at the front of `BootOrder`, preventing unwanted permanent overrides before verification.
-5. **Entry ID Detection**:
-   - By querying `efibootmgr --verbose` before and after entry creation, RustyUKI accurately identifies the assigned four-digit hexadecimal entry ID (e.g. `Boot0007`).
-
----
-
-## Source Code Layout & Module Architecture
-
-The RustyUKI codebase is strictly modularized:
-
-| Module | File | Purpose |
-|---|---|---|
-| `main` | [`src/main.rs`](../src/main.rs) | CLI entrypoint, logging initialization, privilege enforcement (`require_root`), and subcommand routing. |
-| `cli` | [`src/cli.rs`](../src/cli.rs) | Clap derive parser definitions for commands, global options, and argument structures. |
-| `app` | [`src/app.rs`](../src/app.rs) | High-level orchestrator: coordinate generate, install, reconcile, status, and confirm flows. |
-| `config` | [`src/config.rs`](../src/config.rs) | TOML configuration deserialization with Serde and safe defaults. |
-| `dracut` | [`src/dracut.rs`](../src/dracut.rs) | Wraps dracut command generation and execution for stage 1. |
-| `ukify` | [`src/ukify.rs`](../src/ukify.rs) | Wraps ukify assembly, handles temp file generation and atomic rename for stage 2. |
-| `efi` | [`src/efi.rs`](../src/efi.rs) | UEFI NVRAM interactions via `efibootmgr`, ESP mount validation, space checks via `statvfs`, and loader path manipulation. |
-| `kernel` | [`src/kernel.rs`](../src/kernel.rs) | Kernel discovery via `rpm -q kernel`, cmdline extraction and sanitization, UUID blkid verification, caching, and stale UKI pruning. |
-| `hook` | [`src/hook.rs`](../src/hook.rs) | Generates and installs the Fedora `kernel-install` plugin script and the systemd `rustyuki-boot-confirm.service`. |
-| `privilege` | [`src/privilege.rs`](../src/privilege.rs) | POSIX UID verification preventing unprivileged execution. |
-| `cmd` | [`src/cmd.rs`](../src/cmd.rs) | Command execution abstraction (`CommandRunner` trait) allowing comprehensive mocked unit and integration testing without disk/EFI modification. |
-| `error` | [`src/error.rs`](../src/error.rs) | Structured error definitions using `thiserror`. |
+RustyUKI implements multi-stage health assessment:
+1. `rustyuki-boot-confirm.service` is ordered strictly `After=multi-user.target graphical.target systemd-user-sessions.service`.
+2. When invoked, `rustyuki confirm` evaluates system health via `systemctl is-system-running`.
+3. If the system is in `emergency`, `rescue`, or `maintenance` mode, **confirmation is blocked**, and error diagnostics are emitted to journal logs.
+4. Only when userspace has achieved normal healthy operational status is `BootOrder` or `bootctl set-default` finalized.

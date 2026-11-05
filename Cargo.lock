@@ -449,6 +449,7 @@ dependencies = [
  "log",
  "nix",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "toml",

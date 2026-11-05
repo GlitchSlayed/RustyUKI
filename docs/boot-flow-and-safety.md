@@ -1,18 +1,18 @@
 # Boot Safety & Trial Workflow
 
-Replacing a system bootloader is inherently risky. RustyUKI implements defensive design principles, preflight checks, and a trial-boot state machine to protect systems from unbootable states.
+Modifying boot infrastructure carries real risk. RustyUKI implements defensive design principles, preflight safety checks, multi-stage health assessment, and a trial-boot state machine to protect systems from unbootable states.
 
 ---
 
 ## The Fail-Safe Trial Boot Workflow
 
-Instead of immediately replacing your working GRUB boot entry or overwriting the permanent UEFI `BootOrder`, RustyUKI uses UEFI's standard `BootNext` mechanism.
+Instead of immediately replacing your existing bootloader entry or overwriting the permanent UEFI `BootOrder`, RustyUKI leverages trial boot semantics:
 
 ```mermaid
 stateDiagram-v2
-    [*] --> ExistingSystem: GRUB is Default (BootOrder: 0001, 0002)
-    ExistingSystem --> GenerateTrial: rustyuki install or generate --boot-once
-    GenerateTrial --> TrialArmed: UKI registered as Boot0007<br/>BootNext set to 0007<br/>rustyuki-boot-confirm.service enabled<br/>BootOrder untouched (0001, 0002)
+    [*] --> ExistingSystem: Existing Boot Default (BootOrder: 0001, 0002)
+    ExistingSystem --> GenerateTrial: rustyuki install (or generate --boot-once)
+    GenerateTrial --> TrialArmed: UKI registered as Boot0007<br/>BootNext set to 0007<br/>rustyuki-boot-confirm.service armed<br/>Permanent BootOrder untouched (0001, 0002)
     
     TrialArmed --> Reboot: sudo reboot
     
@@ -20,66 +20,93 @@ stateDiagram-v2
     Reboot --> RebootDecision
     
     RebootDecision --> BootsUKI: Firmware executes BootNext (Boot0007)
-    RebootDecision --> BootsGRUB: BootNext fails / Firmware falls back
+    RebootDecision --> BootsFallback: BootNext fails / Firmware falls back
     
     state UKIBootOutcome <<choice>>
     BootsUKI --> UKIBootOutcome
     
-    UKIBootOutcome --> SystemdStarts: Early userspace succeeds
-    UKIBootOutcome --> KernelPanicOrFreeze: UKI fails to boot / Hangs
+    UKIBootOutcome --> UserspaceHealthy: Multi-stage health assessment passes
+    UKIBootOutcome --> DegradedOrEmergency: Panic, freeze, or emergency/rescue target
     
-    SystemdStarts --> ConfirmService: rustyuki-boot-confirm.service runs
-    ConfirmService --> Promoted: Boot0007 moved to front of BootOrder<br/>BootNext cleared<br/>UKI is now permanent default
+    UserspaceHealthy --> ConfirmService: rustyuki confirm executes
+    ConfirmService --> Promoted: Boot0007 promoted to front of BootOrder<br/>BootNext cleared<br/>UKI is now permanent default
     
-    KernelPanicOrFreeze --> HardwareReset: User power-cycles machine
-    HardwareReset --> BootsGRUB: Firmware falls back to BootOrder (0001: GRUB)
+    DegradedOrEmergency --> RefuseConfirmation: Confirmation blocked by health assessment
+    RefuseConfirmation --> HardwareReset: Machine rebooted
+    HardwareReset --> BootsFallback: Firmware falls back to previous BootOrder (0001)
     
-    BootsGRUB --> SafeState: System boots safely into working GRUB
+    BootsFallback --> SafeState: System boots safely into working fallback loader
 ```
-
-### Step-by-Step Flow
-
-1. **Trial Arming**:
-   - `rustyuki install` (or `rustyuki generate --boot-once`) creates the UKI on the ESP.
-   - Registers entry `Boot000X` with `efibootmgr --create --create-only`. The existing permanent `BootOrder` is not touched.
-   - Sets `efibootmgr --bootnext 000X`.
-   - Installs and enables `/etc/systemd/system/rustyuki-boot-confirm.service`.
-
-2. **Reboot**:
-   - Upon restart, the UEFI firmware inspects `BootNext`. It executes `Boot000X` for this single boot attempt only.
-   - Firmware automatically clears the `BootNext` NVRAM variable before launching the OS.
-
-3. **Automatic Confirmation on Success**:
-   - As systemd initializes userspace before `network.target`, `rustyuki-boot-confirm.service` executes `rustyuki confirm`.
-   - `rustyuki confirm` reads `BootCurrent` from UEFI NVRAM, places that entry ID at the front of `BootOrder`, and clears any residual `BootNext`.
-   - The UKI is now your permanent primary bootloader.
-
-4. **Fail-Safe Fallback on Failure**:
-   - If the UKI fails to boot (e.g. kernel panic, freeze, missing filesystem driver), simply reboot or power-cycle the system.
-   - Because `BootNext` is one-time only and `BootOrder` was not modified, the firmware immediately falls back to your existing bootloader (GRUB).
 
 ---
 
-## Boot Confirmation Service
+## Multi-Stage Health Assessment vs. Premature Confirmation
 
-The unit file is installed at `/etc/systemd/system/rustyuki-boot-confirm.service`:
+A critical architectural flaw in early UKI prototypes was executing confirmation immediately after early root mount (`After=local-fs.target`, `Before=network.target`). At that stage, essential userspace subsystems (graphical targets, display servers, network management, core services) have not initialized. If a driver crashes or systemd drops into emergency mode, an unbootable kernel would be prematurely marked as successful.
 
-```ini
-[Unit]
-Description=Confirm successful RustyUKI trial boot
-DefaultDependencies=no
-After=local-fs.target
-Before=network.target
+RustyUKI implements **multi-stage boot health assessment**:
 
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/rustyuki confirm
+1. **Service Ordering**:
+   `rustyuki-boot-confirm.service` is ordered late in the startup sequence:
+   ```ini
+   [Unit]
+   Description=RustyUKI Boot Confirmation & Health Assessment
+   Documentation=https://github.com/GlitchSlayed/RustyUKI
+   After=multi-user.target graphical.target systemd-user-sessions.service
+   Wants=multi-user.target
 
-[Install]
-WantedBy=multi-user.target
+   [Service]
+   Type=oneshot
+   RemainAfterExit=yes
+   ExecStart=/usr/bin/rustyuki confirm
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+
+2. **Target State Assessment**:
+   When `rustyuki confirm` runs, it queries `systemctl is-system-running`:
+   - `running`: System is healthy. Trial boot is promoted to permanent default.
+   - `degraded`: Non-critical service failed, but userspace reached target. Evaluates failure severity and promotes with journal warning.
+   - `emergency` / `rescue` / `maintenance`: **Confirmation is aborted immediately.** The trial boot entry is NOT promoted, ensuring that the machine will fall back to its prior boot path upon next reboot.
+
+---
+
+## FAT32 Power-Loss Durability & Cluster Safety
+
+Calling standard file operations like `rename()` on FAT32 filesystems (typical for EFI System Partitions) does not provide POSIX atomic durability guarantees under unexpected power loss.
+
+To protect against corrupted or zero-length binaries:
+1. UKIs are assembled in staging storage (`/tmp/rustyuki-staging/` or configured staging path).
+2. The file is copied to a temporary hidden file in the ESP directory: `.linux-<version>.efi.tmp`.
+3. An explicit `sync_all()` is executed on the file handle to guarantee all data clusters are written to physical media.
+4. An atomic directory rename moves `.linux-<version>.efi.tmp` to `linux-<version>.efi`.
+5. An explicit `sync_all()` is issued on the parent directory to guarantee the FAT directory entry is flushed to disk.
+
+---
+
+## Fallback Slots (`.prev.efi`) and Provenance Tracking
+
+### Automatic Fallback Preservation
+When deploying a new UKI for kernel `<version>`, if an existing `linux-<version>.efi` is already installed, RustyUKI moves it to `linux-<version>.prev.efi` before overwriting. If the new kernel fails or exhibits regressions, running:
+```bash
+sudo rustyuki rollback --kernel <version>
 ```
+immediately restores the previous working binary without recompilation.
 
-Because it specifies `DefaultDependencies=no` and runs `After=local-fs.target` and `Before=network.target`, it guarantees that confirmation happens as soon as root filesystems are mounted, yet cleanly before networking or display managers start.
+### Sidecar Provenance Manifests
+Every UKI deployed by RustyUKI is accompanied by a metadata sidecar:
+`/efi/EFI/Linux/linux-<version>.efi.manifest.json`
+
+This records:
+- Generator name and version (`rustyuki 0.2.0`)
+- Exact target kernel version and distribution flavor (Fedora / CachyOS / Generic)
+- SHA-256 binary hash
+- Embedded command-line hash
+- Boot backend targeted (`direct` or `systemd-boot`)
+
+**Foreign UKI Protection**:
+During kernel pruning or reconciliation, RustyUKI inspects provenance sidecars. Any UKI missing a valid RustyUKI manifest is treated as an unmanaged or foreign UKI and will **never** be deleted.
 
 ---
 
@@ -98,36 +125,3 @@ When running `sudo rustyuki status`, RustyUKI inspects your root partition's GPT
 | `arm` / `armv7` | `69dad710-2ce4-4e3c-b16c-21a1d49abed3` |
 | `x86` / `i386` | `44479540-f297-41b2-9af7-d131d5f0458a` |
 | `riscv64` | `72ec70a6-cf74-40e6-bd49-4bda08e8f224` |
-| `loongarch64` | `77055800-792c-4f94-b39a-98c91b762bb6` |
-
-### Advisory Output
-
-- **When root GUID matches DPS and `root=` is present:**
-  ```text
-  [INFO] Root partition carries a discoverable GPT GUID.
-         'root=' in your cmdline may be unnecessary on this system.
-         Consider removing it and testing with: rustyuki generate --dry-run
-  ```
-- **When root GUID matches DPS and `root=` is omitted:**
-  ```text
-  [OK] Cmdline has no 'root='. GPT autodiscovery will locate the root partition.
-  ```
-
----
-
-## ESP Preflight Validation Checks
-
-Before any initramfs compilation or binary generation begins, RustyUKI runs rigorous preflight checks on the ESP:
-
-1. **Mountpoint Existence**:
-   - Confirms that `esp_path` exists and is a directory.
-2. **Active Mount Check**:
-   - Parses `/proc/mounts` to verify that `esp_path` is an actively mounted filesystem.
-3. **Read-Only (`ro`) Detection**:
-   - Inspects mount options in `/proc/mounts`. If the ESP is mounted `ro`, the build fails with an actionable remount command (`mount -o remount,rw <esp>`).
-4. **Free Disk Space Verification via `statvfs`**:
-   - Queries `f_bavail * f_frsize` via libc `statvfs`.
-   - **Hard failure (< 50 MB)**: Refuses to build if available space is below 50 MB, preventing partial writes.
-   - **Warning (< 150 MB)**: Emits a warning if available space is under 150 MB, as multiple UKIs or kernel updates could exhaust storage.
-5. **Write Permission Verification**:
-   - Verifies write access using `nix::libc::access(..., W_OK)` on the target output directory.
