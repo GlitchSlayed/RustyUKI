@@ -1,4 +1,4 @@
-name: Fedora RPM
+name: Fedora Build & Packaging
 
 on:
   pull_request:
@@ -50,6 +50,18 @@ jobs:
 
       - name: Mark workspace as a safe Git directory
         run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+
+      - name: Cache Cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-rpm-fc${{ matrix.fedora_version }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-rpm-fc${{ matrix.fedora_version }}-
 
       - name: Build SRPM/RPM
         run: |
@@ -181,6 +193,18 @@ jobs:
 
       - name: Mark workspace as a safe Git directory
         run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+
+      - name: Cache Cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cargo-release-fc${{ matrix.fedora_version }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-release-fc${{ matrix.fedora_version }}-
 
       - name: Build SRPM/RPM using Fedora rpm macros
         run: |

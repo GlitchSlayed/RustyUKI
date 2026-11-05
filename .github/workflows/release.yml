@@ -1,0 +1,129 @@
+name: Release Qualification & Publication
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release Tag (e.g. v0.2.0)'
+        required: true
+        type: string
+      skip_boot_qualification:
+        description: 'Bypass UEFI Boot Qualification (DANGEROUS: Release qualification requirement violated)'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  qualify-boot:
+    name: Mandatory UEFI Boot Qualification Gate
+    if: github.event.inputs.skip_boot_qualification != 'true'
+    uses: ./.github/workflows/fedora-boot-integration.yml
+    with:
+      fedora_version: '45'
+      boot_backend: 'both'
+      scenario: 'all'
+
+  publish-official-release:
+    name: Build & Publish Release Packages
+    needs: qualify-boot
+    if: always() && (needs.qualify-boot.result == 'success' || github.event.inputs.skip_boot_qualification == 'true')
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        fedora_version: ['44', '45']
+    container:
+      image: fedora:${{ matrix.fedora_version }}
+
+    steps:
+      - name: Install build dependencies
+        run: |
+          dnf -y update
+          dnf -y install \
+            git \
+            rpm-build \
+            rpmdevtools \
+            cargo \
+            rust \
+            systemd-rpm-macros
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Mark workspace as a safe Git directory
+        run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+
+      - name: Build SRPM/RPM using Fedora rpm macros
+        run: |
+          set -euo pipefail
+
+          version="$(awk -F '"' '/^version = / {print $2; exit}' Cargo.toml)"
+          topdir="$(rpm --eval '%{_topdir}')"
+
+          rpmdev-setuptree
+
+          archive_dir="rustyuki-${version}"
+          tarball="${archive_dir}.tar.gz"
+
+          git archive --format=tar.gz --prefix="${archive_dir}/" -o "${topdir}/SOURCES/${tarball}" HEAD
+          cp .github/rpm/rustyuki.spec "${topdir}/SPECS/rustyuki.spec"
+
+          sed -i "s/^Version:.*/Version:        ${version}/" "${topdir}/SPECS/rustyuki.spec"
+
+          rpmbuild -ba "${topdir}/SPECS/rustyuki.spec"
+
+          mkdir -p dist
+          find "${topdir}/RPMS" -type f -name '*.rpm' -exec cp {} dist/ \;
+          find "${topdir}/SRPMS" -type f -name '*.src.rpm' -exec cp {} dist/ \;
+
+      - name: Smoke test installed RPM
+        run: |
+          dnf install -y dist/rustyuki-*.x86_64.rpm
+          rustyuki --version
+          test -f /usr/lib/kernel/install.d/90-rustyuki.install
+          test -f /etc/rustyuki/config.toml
+          test -f /usr/lib/systemd/system/rustyuki-boot-confirm.service
+
+      - name: Upload RPM artifacts
+        uses: actions/upload-artifact@v5
+        with:
+          name: fedora-${{ matrix.fedora_version }}-release-rpms
+          path: dist/*
+          if-no-files-found: error
+
+  finalize-release:
+    name: Publish GitHub Release
+    needs: publish-official-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all release RPM artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: dist-all
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ github.event.inputs.release_tag || github.ref_name }}
+          name: RustyUKI ${{ github.event.inputs.release_tag || github.ref_name }}
+          generate_release_notes: true
+          make_latest: true
+          files: dist-all/*
+          body: |
+            Official RustyUKI Release qualified through mandatory UEFI boot validation on Fedora.
+
+            - Commit: `${{ github.sha }}`
+            - Boot Qualification: Verified via QEMU/OVMF UEFI (systemd-boot & Direct UKI)
+            - Supported Distributions: Fedora 44 (`.fc44`), Fedora 45 (`.fc45`)

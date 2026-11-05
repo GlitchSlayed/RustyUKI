@@ -108,60 +108,77 @@ ls -l ~/rpmbuild/SRPMS/*.rpm
 
 ---
 
-## Continuous Integration (`checks.yml`)
+# Two-Tier CI/CD Architecture & Packaging
 
-The repository runs continuous validation across a matrix of the latest two Fedora releases (**Fedora 44** and **Fedora 45**) on every push and pull request via [`.github/workflows/checks.yml`](../.github/workflows/checks.yml):
+RustyUKI implements a two-tier continuous integration and deployment architecture designed to balance rapid developer feedback on every commit with exhaustive, real-system boot validation for scheduled qualification and release gates:
 
 ```mermaid
-flowchart LR
-    PushOrPR["Git Push / PR"] --> Matrix["Matrix Strategy:<br/>Fedora 44 & Fedora 45 Containers"]
-    Matrix --> Fmt["cargo fmt --all --check"]
-    Fmt --> Tests["cargo test --all-targets --locked"]
-    Tests --> Clippy["cargo clippy --all-targets -- -D warnings"]
-    Clippy --> Check["cargo check --all-targets --locked"]
-    Check --> Build["cargo build --all-targets --locked"]
+flowchart TD
+    subgraph Tier1["Tier 1: Fast Fedora CI (Every Push & Pull Request)"]
+        Checks["checks.yml<br/>Fmt, Clippy, 44 Unit/Mock Tests, Cargo Check"]
+        Build["fedora-build.yml<br/>Fedora 44/45 RPM Packaging, Smoke Tests, Nightly Releases"]
+    end
+
+    subgraph Tier2["Tier 2: Real Fedora UEFI Boot CI (Weekly, Dispatch, Release Gates)"]
+        Boot["fedora-boot-integration.yml<br/>QEMU/OVMF UEFI Firmware Execution"]
+        SD["Scenario A: systemd-boot Type #2"]
+        Direct["Scenario B: Direct UEFI efibootmgr"]
+        Life["Scenario C: Kernel Lifecycle & Pruning"]
+        Rec["Scenario D: Rollback Recovery (.prev.efi)"]
+        Neg["Negative Verification Gate"]
+    end
+
+    subgraph Release["Release Qualification Pipeline"]
+        Rel["release.yml<br/>Mandatory Boot Qualification Gate -> Official Release Packages"]
+    end
+
+    Push["Git Push / PR"] --> Tier1
+    Schedule["Weekly Cron / Dispatch / Tag"] --> Tier2
+    Rel --> Boot
 ```
 
-### Features Verified:
-- **Matrix Testing**: Validates code and dependencies against Fedora 44 (`fedora:44`) and Fedora 45 (`fedora:45`).
-- **Rustfmt Compliance**: Ensures consistent formatting across all modules and tests.
-- **Unit and Integration Tests**: Runs tests in [`tests/integration_cli.rs`](../tests/integration_cli.rs) and [`tests/backend_and_safety.rs`](../tests/backend_and_safety.rs) using mocked system calls (`MockRunner`).
-- **Strict Clippy**: Enforces `-D warnings` across all code.
-- **Lockfile Integrity**: Enforces `--locked` flags when `Cargo.lock` is present.
+---
+
+## Tier 1: Fast Fedora CI
+
+### 1. Code Quality & Unit Tests (`checks.yml`)
+The workflow in [`.github/workflows/checks.yml`](../.github/workflows/checks.yml) runs across **Fedora 44** and **Fedora 45** containers on every push and PR:
+- **Cargo Format Check**: `cargo fmt --all -- --check`
+- **Strict Clippy**: `cargo clippy --all-targets --all-features -- -D warnings`
+- **Unit and Integration Tests**: 44 tests across `tests/integration_cli.rs` and `tests/backend_and_safety.rs` using mocked system calls (`MockRunner`).
+- **Cargo Caching**: Persistent caching of `~/.cargo/registry` and `target/` via `actions/cache@v4`.
+
+### 2. Automated RPM Builds & Smoke Tests (`fedora-build.yml`)
+The workflow in [`.github/workflows/fedora-build.yml`](../.github/workflows/fedora-build.yml) validates RPM packaging:
+- **Clean Container Packaging**: Builds binary and source RPMs using Fedora RPM macros.
+- **Installation Smoke Test**: Verifies binary execution, kernel-install plugin (`90-rustyuki.install`), config file (`config.toml`), and boot confirmation unit (`rustyuki-boot-confirm.service`).
+- **Nightly Releases**: On pushes to `main`, packages and publishes an automated release tagged `rpm-nightly-YYYYMMDD-<short-sha>` with all `.rpm` and `.src.rpm` artifacts attached.
 
 ---
 
-## Automated RPM CI, Smoke Tests & Nightly Releases (`rpm.yml`)
+## Tier 2: Real Fedora UEFI Boot CI (`fedora-boot-integration.yml`)
 
-The workflow in [`.github/workflows/rpm.yml`](../.github/workflows/rpm.yml) validates and builds the RPM package across Fedora 44 and Fedora 45:
-1. **Pull Requests (`rpm-ci`)**: Automatically builds SRPMs and binary RPMs in clean Fedora 44 & 45 containers, followed by an immediate installation smoke test:
-   - `dnf install -y dist/rustyuki-*.x86_64.rpm`
-   - `rustyuki --version`
-   - Verifies `/usr/lib/kernel/install.d/90-rustyuki.install`
-   - Verifies `/etc/rustyuki/config.toml`
-   - Verifies `/usr/lib/systemd/system/rustyuki-boot-confirm.service`
-2. **Each Commit & Scheduled Releases (`plan-release` -> `build-release-rpms` -> `publish-release`)**:
-   - On every commit push to `main` (as well as nightly schedule and manual dispatch), the pipeline builds binary RPMs and SRPMs targeting Fedora 44 and Fedora 45.
-   - Runs full package installation and smoke tests.
-   - Automatically publishes a GitHub Release tagged `rpm-nightly-YYYYMMDD-<short-sha>` with all built `.rpm` and `.src.rpm` artifacts attached.
-
----
-
-## Real Fedora VM Boot Integration Testing (`fedora-boot-integration.yml`)
-
-The workflow in [`.github/workflows/fedora-boot-integration.yml`](../.github/workflows/fedora-boot-integration.yml) executes full-lifecycle UKI boot and management tests on official Fedora installations using QEMU and OVMF UEFI firmware.
-
-### Architecture & Caching Strategy
-- **Base Image Pinned Manifest**: [`scripts/fedora_image_manifest.json`](../scripts/fedora_image_manifest.json) pins official Fedora 45 and Fedora 44 Cloud Base Generic image URLs and cryptographic SHA-256 digests.
-- **Persistent Image Caching**: GitHub Actions restores the verified base `.qcow2` images via `actions/cache@v4` with cache key `fedora-vm-cache-v1-${{ matrix.fedora_version }}-${{ hashFiles('scripts/fedora_image_manifest.json') }}`. Cache misses trigger automatic download and cryptographic verification.
-- **Disposable Overlays**: Tests never mutate the cached base image. Each scenario executes inside a disposable qcow2 overlay with an isolated, disposable copy of `OVMF_VARS.fd`.
-- **Virtualization Acceleration**: Automatically utilizes KVM (`/dev/kvm`) on GitHub-hosted `ubuntu-24.04` runners, falling back to TCG emulation when KVM is unavailable.
+The workflow in [`.github/workflows/fedora-boot-integration.yml`](../.github/workflows/fedora-boot-integration.yml) executes genuine QEMU/OVMF UEFI virtual machine tests against official Fedora installations:
+- **Triggers**: Weekly schedule (`cron: '0 3 * * 0'`), manual `workflow_dispatch` (with release, backend, and scenario selectors), and `workflow_call` during release qualification.
+- **Hardware Virtualization**: Runs on `ubuntu-24.04` runners using KVM (`/dev/kvm`), with automated fallback to TCG emulation when KVM is unavailable.
+- **Dedicated 1GB ESP**: Provisions an isolated 1024MB FAT32 ESP drive attached to QEMU as `/dev/vdb` (mounted at `/efi`), ensuring multiple UKIs, backups, and kernel updates never face space constraints.
+- **Persistent Image Caching**: Caches verified Fedora base images in `tests/vm/cache/` using SHA-256 digests pinned in [`scripts/fedora_image_manifest.json`](../scripts/fedora_image_manifest.json).
+- **Disposable Overlays**: Tests never mutate the base image; every run uses a fresh qcow2 overlay and disposable `OVMF_VARS.fd`.
 
 ### Scenarios Covered
 | Scenario | Backend | Description |
 |---|---|---|
 | **Scenario A** | `systemd-boot` | Fresh conversion from conventional Fedora GRUB to systemd-boot Type #2 UKI, firmware reboot, kernel assertion, and health verification (Mandatory release gate). |
-| **Scenario B** | `direct` | Registration and boot through Direct UEFI firmware entry via `efibootmgr`, trial boot assessment, and boot confirmation. |
+| **Scenario B** | `direct` | Registration and boot through Direct UEFI firmware entry via `efibootmgr`, trial boot assessment, and boot confirmation (`rustyuki confirm`). |
 | **Scenario C** | Lifecycle | Multiple kernel versions, automated UKI generation, reconciliation, and safe pruning retaining active and fallback slots. |
 | **Scenario D** | Recovery | Rollback recovery preserving `.prev.efi` fallback slot intact for repeatable recovery operations. |
 | **Negative Verification** | Safety Gate | Deliberately simulates guest assertion failures to verify the harness detects errors and never emits false passes. |
+
+---
+
+## Release Qualification Gate (`release.yml`)
+
+The workflow in [`.github/workflows/release.yml`](../.github/workflows/release.yml) ensures that no release is published without passing real UEFI boot qualification:
+1. Triggers on tag pushes (`v*`) or manual release dispatch.
+2. Invokes `fedora-boot-integration.yml` on the exact release commit.
+3. Only upon successful execution of all UEFI boot scenarios does it build the official Fedora 44 & 45 RPM packages and publish the GitHub Release.

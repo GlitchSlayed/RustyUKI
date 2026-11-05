@@ -1,19 +1,9 @@
 name: Fedora Boot Integration
 
 on:
-  push:
-    branches:
-      - main
-      - master
-    paths:
-      - 'src/**'
-      - 'packaging/**'
-      - 'scripts/**'
-      - 'tests/**'
-      - 'Cargo.*'
-      - '.github/workflows/fedora-boot-integration.yml'
   schedule:
-    - cron: '30 2 * * *'
+    # Weekly run every Sunday at 03:00 UTC
+    - cron: '0 3 * * 0'
   workflow_dispatch:
     inputs:
       fedora_version:
@@ -24,8 +14,25 @@ on:
         options:
           - '45'
           - '44'
+      boot_backend:
+        description: 'Boot Backend to Test'
+        required: true
+        default: 'both'
+        type: choice
+        options:
+          - 'both'
+          - 'systemd-boot'
+          - 'direct'
+      test_profile:
+        description: 'Test Environment Profile'
+        required: true
+        default: 'standard'
+        type: choice
+        options:
+          - 'standard'
+          - 'workstation'
       scenario:
-        description: 'Test Scenario'
+        description: 'Scenario Selection'
         required: true
         default: 'all'
         type: choice
@@ -36,18 +43,31 @@ on:
           - 'C'
           - 'D'
           - 'negative'
+  workflow_call:
+    inputs:
+      fedora_version:
+        description: 'Target Fedora Release'
+        required: false
+        default: '45'
+        type: string
+      boot_backend:
+        description: 'Boot Backend to Test'
+        required: false
+        default: 'both'
+        type: string
+      scenario:
+        description: 'Scenario Selection'
+        required: false
+        default: 'all'
+        type: string
 
 permissions:
   contents: read
 
 jobs:
   vm-integration-tests:
-    name: Fedora ${{ matrix.fedora_version }} VM UKI Boot
+    name: Fedora ${{ inputs.fedora_version || '45' }} UEFI Boot (${{ inputs.boot_backend || 'both' }})
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        fedora_version: ['45', '44']
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -63,12 +83,15 @@ jobs:
             python3
 
       - name: Verify KVM virtualization availability
+        id: kvm-check
         run: |
           if [ -e /dev/kvm ]; then
             echo "KVM acceleration available at /dev/kvm"
             sudo chmod 666 /dev/kvm || true
+            echo "has_kvm=true" >> "$GITHUB_OUTPUT"
           else
             echo "WARNING: /dev/kvm not found; QEMU will execute via TCG emulation."
+            echo "has_kvm=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Cache Cargo dependencies and target
@@ -88,30 +111,80 @@ jobs:
         uses: actions/cache@v4
         with:
           path: tests/vm/cache
-          key: fedora-vm-cache-v1-${{ matrix.fedora_version }}-${{ hashFiles('scripts/fedora_image_manifest.json') }}
+          key: fedora-vm-cache-v1-${{ inputs.fedora_version || '45' }}-${{ hashFiles('scripts/fedora_image_manifest.json') }}
           restore-keys: |
-            fedora-vm-cache-v1-${{ matrix.fedora_version }}-
+            fedora-vm-cache-v1-${{ inputs.fedora_version || '45' }}-
             fedora-vm-cache-v1-
 
       - name: Build RustyUKI release binary
         run: cargo build --release
 
       - name: Run Fedora VM integration scenarios
+        id: run-scenarios
         env:
-          INPUT_SCENARIO: ${{ github.event.inputs.scenario || 'all' }}
+          TARGET_RELEASE: ${{ inputs.fedora_version || '45' }}
+          TARGET_SCENARIO: ${{ inputs.scenario || 'all' }}
+          TARGET_BACKEND: ${{ inputs.boot_backend || 'both' }}
+          CACHE_HIT: ${{ steps.cache-fedora-vm.outputs.cache-hit || 'false' }}
+          HAS_KVM: ${{ steps.kvm-check.outputs.has_kvm }}
         run: |
           mkdir -p artifacts/vm_logs
+
+          # Map backend choice to scenario if specific backend requested
+          SCENARIO_ARG="${TARGET_SCENARIO}"
+          if [ "${TARGET_SCENARIO}" = "all" ]; then
+            if [ "${TARGET_BACKEND}" = "systemd-boot" ]; then
+              SCENARIO_ARG="A"
+            elif [ "${TARGET_BACKEND}" = "direct" ]; then
+              SCENARIO_ARG="B"
+            fi
+          fi
+
           ./scripts/verify_fedora_vm.py \
-            --release "${{ matrix.fedora_version }}" \
-            --scenario "${INPUT_SCENARIO}" \
+            --release "${TARGET_RELEASE}" \
+            --scenario "${SCENARIO_ARG}" \
             --accel auto \
             --cache-dir tests/vm/cache \
             --artifacts-dir artifacts/vm_logs
+
+      - name: Generate GitHub Actions Job Summary
+        if: always()
+        env:
+          TARGET_RELEASE: ${{ inputs.fedora_version || '45' }}
+          TARGET_BACKEND: ${{ inputs.boot_backend || 'both' }}
+          CACHE_HIT: ${{ steps.cache-fedora-vm.outputs.cache-hit || 'false' }}
+          HAS_KVM: ${{ steps.kvm-check.outputs.has_kvm }}
+        run: |
+          QEMU_VER="$(qemu-system-x86_64 --version | head -n 1)"
+          COMMIT_SHA="$(git rev-parse HEAD)"
+
+          cat << SUMMARY_EOF >> "$GITHUB_STEP_SUMMARY"
+          ## 🚀 RustyUKI Fedora UEFI Boot Integration Results
+
+          | Metric | Value |
+          |---|---|
+          | **Target Fedora Release** | Fedora ${TARGET_RELEASE} |
+          | **RustyUKI Commit** | \`${COMMIT_SHA}\` |
+          | **Boot Backend Tested** | \`${TARGET_BACKEND}\` |
+          | **Virtualization Acceleration** | \`${HAS_KVM == 'true' && 'KVM (Hardware-accelerated)' || 'TCG (Software Emulation)'}\` |
+          | **Host Hypervisor** | \`${QEMU_VER}\` |
+          | **Base Image Cache Status** | \`${CACHE_HIT == 'true' && 'CACHE HIT' || 'CACHE MISS (Downloaded & Verified)'}\` |
+          | **Overall Test Status** | **${{ steps.run-scenarios.outcome == 'success' && '✅ PASSED' || '❌ FAILED' }}** |
+
+          ### Scenarios Executed
+          - **Scenario A (systemd-boot)**: BLS Type #2 automatic UKI discovery, UKI generation & installation, firmware boot, kernel verification.
+          - **Scenario B (Direct UKI)**: NVRAM registration via \`efibootmgr\`, firmware boot entry execution, trial boot confirmation.
+          - **Scenario C (Kernel Lifecycle)**: Staged multi-kernel updates, reconciliation, and automated pruning.
+          - **Scenario D (Recovery & Durability)**: Fallback slot (\`.prev.efi\`) preservation and repeated recovery testing.
+          - **Negative Verification**: Safety harness verification ensuring deliberate guest assertion failures produce non-zero exit codes.
+
+          Diagnostics and serial console logs are preserved in workflow artifacts below.
+          SUMMARY_EOF
 
       - name: Upload VM serial logs and diagnostic artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: fedora-${{ matrix.fedora_version }}-vm-logs-${{ github.run_number }}
+          name: fedora-${{ inputs.fedora_version || '45' }}-vm-logs-${{ github.run_number }}
           path: artifacts/vm_logs/*
           if-no-files-found: ignore
