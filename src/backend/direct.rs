@@ -47,10 +47,15 @@ impl BootBackend for DirectUefiBackend {
                 backend: BootBackendType::Direct,
                 entry_id: None,
                 description: format!(
-                    "Deferred direct boot entry for {} (offline sysroot mode)",
-                    uki.kernel_version
+                    "Deferred direct boot entry for {} (offline sysroot mode{})",
+                    uki.kernel_version,
+                    if trial {
+                        "; trial arming deferred until live boot"
+                    } else {
+                        ""
+                    }
                 ),
-                is_trial: trial,
+                is_trial: false,
             });
         }
 
@@ -178,7 +183,9 @@ impl BootBackend for DirectUefiBackend {
             .with_context(|| format!("failed setting BootOrder to {boot_order_arg}"))?;
 
         if state.next.is_some() {
-            let _ = runner.run("efibootmgr", &["--delete-bootnext"]);
+            if let Err(e) = runner.run("efibootmgr", &["--delete-bootnext"]) {
+                log::warn!("Could not clear BootNext entry via efibootmgr: {e:#}");
+            }
         }
 
         Ok(current)

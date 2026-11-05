@@ -12,7 +12,7 @@ use crate::install::{
 use crate::kernel::{discover_installed_kernels, resolve_target_kernel};
 use crate::model::{BootBackendType, KernelInfo};
 use anyhow::{bail, Context, Result};
-use log::info;
+use log::{info, warn};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -173,9 +173,19 @@ pub fn install(
             let _ = fs::create_dir_all(parent);
         }
         if let Ok(unit_content) = render_boot_confirm_service(&current_exe) {
-            let _ = fs::write(&unit_path, unit_content);
-            let _ = runner.run("systemctl", &["daemon-reload"]);
-            let _ = runner.run("systemctl", &["enable", "rustyuki-boot-confirm.service"]);
+            if let Err(e) = fs::write(&unit_path, unit_content) {
+                warn!(
+                    "Could not write boot confirmation service to {}: {e}",
+                    unit_path.display()
+                );
+            } else {
+                let _ = runner.run("systemctl", &["daemon-reload"]);
+                if let Err(e) =
+                    runner.run("systemctl", &["enable", "rustyuki-boot-confirm.service"])
+                {
+                    warn!("Could not enable boot confirmation service: {e:#}");
+                }
+            }
         }
     }
 
@@ -248,17 +258,18 @@ pub fn rollback(cfg: &AppConfig, kernel_version: &str) -> Result<PathBuf> {
 }
 
 /// Promotes the booted trial image after multi-stage health assessment.
-pub fn confirm(runner: &dyn CommandRunner) -> Result<String> {
-    confirm_backend(runner, BootBackendType::Direct)
+pub fn confirm(runner: &dyn CommandRunner, force: bool) -> Result<String> {
+    confirm_backend(runner, BootBackendType::Direct, force)
 }
 
 /// Promotes the booted trial image using the specified boot backend.
 pub fn confirm_backend(
     runner: &dyn CommandRunner,
     backend_type: BootBackendType,
+    force: bool,
 ) -> Result<String> {
     let backend = create_backend(backend_type);
-    execute_safe_confirmation(runner, backend.as_ref())
+    execute_safe_confirmation(runner, backend.as_ref(), force)
 }
 
 /// Reports operational status, boot environment, and GPT autodiscovery advisory.

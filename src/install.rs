@@ -40,8 +40,41 @@ pub fn install_uki_to_esp(
             "Preserving existing UKI as fallback slot -> {}",
             backup_path.display()
         );
-        let _ = fs::copy(&final_uki_path, &backup_path);
-        has_backup = backup_path.exists();
+        let src_metadata = fs::metadata(&final_uki_path).with_context(|| {
+            format!(
+                "failed reading metadata of existing UKI {}",
+                final_uki_path.display()
+            )
+        })?;
+        let src_len = src_metadata.len();
+
+        let bytes_copied = fs::copy(&final_uki_path, &backup_path).with_context(|| {
+            format!(
+                "failed creating backup slot at {} before replacing {}",
+                backup_path.display(),
+                final_uki_path.display()
+            )
+        })?;
+
+        if bytes_copied != src_len {
+            let _ = fs::remove_file(&backup_path);
+            bail!(
+                "backup copy incomplete for {}: wrote {bytes_copied} bytes, expected {src_len} bytes",
+                final_uki_path.display()
+            );
+        }
+
+        let b_file = File::open(&backup_path).with_context(|| {
+            format!(
+                "failed opening backup file {} for sync",
+                backup_path.display()
+            )
+        })?;
+        b_file
+            .sync_all()
+            .with_context(|| format!("fsync failed on backup slot {}", backup_path.display()))?;
+
+        has_backup = true;
     }
 
     // Stage write to hidden temporary sibling file on the same filesystem
@@ -75,8 +108,30 @@ pub fn install_uki_to_esp(
     })?;
 
     // Commit directory entry on FAT32
-    if let Ok(dir_file) = File::open(output_dir) {
-        let _ = dir_file.sync_all();
+    let dir_file = File::open(output_dir).with_context(|| {
+        format!(
+            "failed opening directory {} for durability sync",
+            output_dir.display()
+        )
+    })?;
+    if let Err(e) = dir_file.sync_all() {
+        let is_unsupported = e.kind() == std::io::ErrorKind::Unsupported
+            || e.raw_os_error() == Some(22)  // EINVAL
+            || e.raw_os_error() == Some(95)  // ENOTSUP / EOPNOTSUPP
+            || e.raw_os_error() == Some(38); // ENOSYS
+        if is_unsupported {
+            log::debug!(
+                "Directory sync not supported by filesystem at {}: {e}",
+                output_dir.display()
+            );
+        } else {
+            return Err(e).with_context(|| {
+                format!(
+                    "directory durability sync failed on {}",
+                    output_dir.display()
+                )
+            });
+        }
     }
 
     // Record sidecar provenance manifest
@@ -94,7 +149,9 @@ pub fn install_uki_to_esp(
     let mut m_file = File::create(&manifest_path)
         .with_context(|| format!("failed creating manifest {}", manifest_path.display()))?;
     m_file.write_all(manifest_json.as_bytes())?;
-    let _ = m_file.sync_all();
+    m_file
+        .sync_all()
+        .with_context(|| format!("fsync failed on manifest {}", manifest_path.display()))?;
 
     info!(
         "Successfully installed UKI: {} (sha256: {}...)",
@@ -235,14 +292,41 @@ pub fn rollback_kernel_uki(output_dir: &Path, kernel_version: &str) -> Result<Pa
         backup_uki.display()
     );
 
+    let backup_metadata = fs::metadata(&backup_uki).with_context(|| {
+        format!(
+            "failed reading metadata of backup slot {}",
+            backup_uki.display()
+        )
+    })?;
+    let backup_len = backup_metadata.len();
+
     // Atomically swap backup into active slot
-    fs::copy(&backup_uki, &target_uki).with_context(|| {
+    let bytes_copied = fs::copy(&backup_uki, &target_uki).with_context(|| {
         format!(
             "failed restoring backup slot {} -> {}",
             backup_uki.display(),
             target_uki.display()
         )
     })?;
+
+    if bytes_copied != backup_len {
+        bail!("incomplete rollback copy: copied {bytes_copied} bytes, expected {backup_len} bytes");
+    }
+
+    let t_file = File::open(&target_uki).with_context(|| {
+        format!(
+            "failed opening restored target {} for sync",
+            target_uki.display()
+        )
+    })?;
+    t_file
+        .sync_all()
+        .with_context(|| format!("fsync failed on restored target {}", target_uki.display()))?;
+
+    // Commit directory entry
+    if let Ok(dir_file) = File::open(output_dir) {
+        let _ = dir_file.sync_all();
+    }
 
     Ok(target_uki)
 }

@@ -29,14 +29,31 @@ impl BootBackend for SystemdBootBackend {
             return Ok(ActivationResult {
                 backend: BootBackendType::SystemdBoot,
                 entry_id: Some(entry_name.clone()),
-                description: format!("Deployed Type #2 UKI {entry_name} (offline sysroot mode)"),
-                is_trial: trial,
+                description: format!(
+                    "Deployed Type #2 UKI {entry_name} (offline sysroot mode{})",
+                    if trial {
+                        "; trial arming deferred until live boot"
+                    } else {
+                        ""
+                    }
+                ),
+                is_trial: false,
             });
         }
 
         // Run bootctl update to ensure bootloader binaries and Type #2 discovery are in sync
         info!("Synchronizing systemd-boot via bootctl update");
-        let _ = runner.run("bootctl", &["update"]);
+        if let Err(update_err) = runner.run("bootctl", &["update"]) {
+            log::warn!("'bootctl update' reported an error: {update_err:#}");
+            // Check whether systemd-boot is installed in ESP
+            if let Ok(st) = runner.run("bootctl", &["status"]) {
+                if st.stdout.contains("systemd-boot not installed") {
+                    anyhow::bail!(
+                        "systemd-boot is not installed on the EFI System Partition. Run 'bootctl install' before activation."
+                    );
+                }
+            }
+        }
 
         if trial {
             info!("Configuring systemd-boot one-shot trial: {entry_name}");
@@ -67,18 +84,27 @@ impl BootBackend for SystemdBootBackend {
 
     fn confirm(&self, runner: &dyn CommandRunner) -> Result<String> {
         // Query current bootctl status
-        let output = runner.run("bootctl", &["status"])?;
+        let output = runner
+            .run("bootctl", &["status"])
+            .context("failed querying bootctl status during confirmation")?;
 
         // Determine current entry or set-default
         info!("Confirming systemd-boot: verifying active boot and synchronizing default entry");
 
-        // If systemd-bless-boot is available, invoke it
+        // If systemd-bless-boot is available, invoke it and propagate any failure
         if runner.run("which", &["systemd-bless-boot"]).is_ok() {
-            let _ = runner.run("systemd-bless-boot", &["good"]);
+            runner
+                .run("systemd-bless-boot", &["good"])
+                .context("systemd-bless-boot failed to mark current boot as good")?;
+            info!("Successfully marked boot successful via systemd-bless-boot");
+        } else {
+            info!("systemd-bless-boot not available; relying on standard bootctl entry state");
         }
 
-        // Clear any lingering oneshot
-        let _ = runner.run("bootctl", &["set-oneshot", ""]);
+        // Clear any lingering oneshot entry and propagate any failure
+        runner
+            .run("bootctl", &["set-oneshot", ""])
+            .context("failed clearing lingering oneshot trial entry via bootctl")?;
 
         let summary = output
             .stdout

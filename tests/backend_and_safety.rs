@@ -150,6 +150,7 @@ fn test_systemd_boot_backend_offline_skips_commands() {
         .activate(&runner, &installed, Path::new("/target/efi"), true, true)
         .unwrap();
     assert_eq!(res.entry_id, Some("linux-6.17.4-cachyos.efi".to_string()));
+    assert!(!res.is_trial);
     runner.assert_complete();
 }
 
@@ -171,6 +172,7 @@ fn test_direct_uefi_backend_offline_skips_nvram() {
         .activate(&runner, &installed, Path::new("/target/efi"), true, true)
         .unwrap();
     assert_eq!(res.entry_id, None);
+    assert!(!res.is_trial);
     runner.assert_complete();
 }
 
@@ -186,9 +188,64 @@ fn test_boot_assessment_blocks_emergency_mode() {
     }]);
 
     let backend = DirectUefiBackend;
-    let err = execute_safe_confirmation(&runner, &backend);
+    let err = execute_safe_confirmation(&runner, &backend, false);
     assert!(err.is_err());
     assert!(err.unwrap_err().to_string().contains("emergency"));
+    runner.assert_complete();
+}
+
+#[test]
+fn test_boot_assessment_blocks_indeterminate_unknown_without_force() {
+    let runner = TestMockRunner::new(vec![MockCall {
+        program: "systemctl".to_string(),
+        args: vec!["is-system-running".to_string()],
+        output: Ok(ProcessOutput {
+            stdout: "starting\n".to_string(),
+            stderr: String::new(),
+        }),
+    }]);
+
+    let backend = DirectUefiBackend;
+    let err = execute_safe_confirmation(&runner, &backend, false);
+    assert!(err.is_err());
+    let msg = err.unwrap_err().to_string();
+    assert!(
+        msg.contains("indeterminate (Unknown)"),
+        "error did not explain indeterminate status: {msg}"
+    );
+    runner.assert_complete();
+}
+
+#[test]
+fn test_boot_assessment_allows_unknown_with_force() {
+    let runner = TestMockRunner::new(vec![
+        MockCall {
+            program: "systemctl".to_string(),
+            args: vec!["is-system-running".to_string()],
+            output: Ok(ProcessOutput {
+                stdout: "starting\n".to_string(),
+                stderr: String::new(),
+            }),
+        },
+        MockCall {
+            program: "efibootmgr".to_string(),
+            args: vec!["--verbose".to_string()],
+            output: Ok(ProcessOutput {
+                stdout: "BootCurrent: 0002\nBootOrder: 0001,0002\nBoot0002* Linux UKI 6.17.4\n"
+                    .to_string(),
+                stderr: String::new(),
+            }),
+        },
+        MockCall {
+            program: "efibootmgr".to_string(),
+            args: vec!["--bootorder".to_string(), "0002,0001".to_string()],
+            output: Ok(ProcessOutput::default()),
+        },
+    ]);
+
+    let backend = DirectUefiBackend;
+    let res = execute_safe_confirmation(&runner, &backend, true).unwrap();
+    assert_eq!(res, "0002");
     runner.assert_complete();
 }
 
@@ -232,8 +289,114 @@ fn test_boot_assessment_allows_healthy_mode() {
     ]);
 
     let backend = SystemdBootBackend;
-    let res = execute_safe_confirmation(&runner, &backend).unwrap();
+    let res = execute_safe_confirmation(&runner, &backend, false).unwrap();
     assert_eq!(res, "default: linux-6.17.4-cachyos.efi");
+    runner.assert_complete();
+}
+
+#[test]
+fn test_systemd_boot_confirm_fails_when_bless_boot_fails() {
+    let runner = TestMockRunner::new(vec![
+        MockCall {
+            program: "bootctl".to_string(),
+            args: vec!["status".to_string()],
+            output: Ok(ProcessOutput {
+                stdout: "default: linux-6.17.4-cachyos.efi\n".to_string(),
+                stderr: String::new(),
+            }),
+        },
+        MockCall {
+            program: "which".to_string(),
+            args: vec!["systemd-bless-boot".to_string()],
+            output: Ok(ProcessOutput {
+                stdout: "/usr/bin/systemd-bless-boot\n".to_string(),
+                stderr: String::new(),
+            }),
+        },
+        MockCall {
+            program: "systemd-bless-boot".to_string(),
+            args: vec!["good".to_string()],
+            output: Err(anyhow::anyhow!("bless boot I/O error")),
+        },
+    ]);
+
+    let backend = SystemdBootBackend;
+    let err = backend.confirm(&runner);
+    assert!(err.is_err());
+    assert!(err
+        .unwrap_err()
+        .to_string()
+        .contains("systemd-bless-boot failed"));
+    runner.assert_complete();
+}
+
+#[test]
+fn test_systemd_boot_confirm_fails_when_set_oneshot_clear_fails() {
+    let runner = TestMockRunner::new(vec![
+        MockCall {
+            program: "bootctl".to_string(),
+            args: vec!["status".to_string()],
+            output: Ok(ProcessOutput {
+                stdout: "default: linux-6.17.4-cachyos.efi\n".to_string(),
+                stderr: String::new(),
+            }),
+        },
+        MockCall {
+            program: "which".to_string(),
+            args: vec!["systemd-bless-boot".to_string()],
+            output: Err(anyhow::anyhow!("not found")),
+        },
+        MockCall {
+            program: "bootctl".to_string(),
+            args: vec!["set-oneshot".to_string(), "".to_string()],
+            output: Err(anyhow::anyhow!("NVRAM permission error")),
+        },
+    ]);
+
+    let backend = SystemdBootBackend;
+    let err = backend.confirm(&runner);
+    assert!(err.is_err());
+    assert!(err
+        .unwrap_err()
+        .to_string()
+        .contains("clearing lingering oneshot"));
+    runner.assert_complete();
+}
+
+#[test]
+fn test_systemd_boot_activate_fails_when_bootctl_not_installed() {
+    let runner = TestMockRunner::new(vec![
+        MockCall {
+            program: "bootctl".to_string(),
+            args: vec!["update".to_string()],
+            output: Err(anyhow::anyhow!("bootctl update failed")),
+        },
+        MockCall {
+            program: "bootctl".to_string(),
+            args: vec!["status".to_string()],
+            output: Ok(ProcessOutput {
+                stdout: "systemd-boot not installed in ESP\n".to_string(),
+                stderr: String::new(),
+            }),
+        },
+    ]);
+
+    let backend = SystemdBootBackend;
+    let installed = InstalledUki {
+        kernel_version: "6.17.4-cachyos".to_string(),
+        path: PathBuf::from("/efi/EFI/Linux/linux-6.17.4-cachyos.efi"),
+        manifest_path: PathBuf::from("/efi/EFI/Linux/linux-6.17.4-cachyos.efi.manifest.json"),
+        manifest: None,
+        has_backup_slot: false,
+        backup_slot_path: PathBuf::from("/efi/EFI/Linux/linux-6.17.4-cachyos.prev.efi"),
+    };
+
+    let err = backend.activate(&runner, &installed, Path::new("/efi"), false, false);
+    assert!(err.is_err());
+    assert!(err
+        .unwrap_err()
+        .to_string()
+        .contains("Run 'bootctl install'"));
     runner.assert_complete();
 }
 
@@ -413,4 +576,46 @@ fn test_direct_uefi_diagnostics_reports_nvram_entries() {
         .iter()
         .any(|d| d.level == DiagnosticLevel::Info && d.title.contains("Direct UEFI Execution")));
     runner.assert_complete();
+}
+
+#[test]
+fn test_install_uki_backup_failure_preserves_existing_file() {
+    let temp = TempDir::new().unwrap();
+    let esp_out = temp.path().join("EFI/Linux");
+    std::fs::create_dir_all(&esp_out).unwrap();
+
+    let initial_uki = esp_out.join("linux-6.12.0.efi");
+    std::fs::write(&initial_uki, b"ORIGINAL-WORKING-IMAGE").unwrap();
+
+    // Cause backup to fail by creating backup path as a non-empty directory or inaccessible
+    let backup_path = esp_out.join("linux-6.12.0.prev.efi");
+    std::fs::create_dir(&backup_path).unwrap();
+
+    let staging_dir = temp.path().join("staging");
+    std::fs::create_dir_all(&staging_dir).unwrap();
+    let staging_file = staging_dir.join("new.efi");
+    std::fs::write(&staging_file, b"NEW-CORRUPTED-OR-UNBACKED-IMAGE").unwrap();
+
+    let artifact = UkiArtifact {
+        kernel_version: "6.12.0".to_string(),
+        path: staging_file,
+        sha256: "new-hash".to_string(),
+        size_bytes: 31,
+        cmdline_hash: "cmd".to_string(),
+        flavor: KernelFlavor::Fedora,
+    };
+
+    // Installation MUST fail because backup cannot be created
+    let res = install_uki_to_esp(&artifact, &esp_out, BootBackendType::Direct, true);
+    assert!(
+        res.is_err(),
+        "install should have failed when backup copy fails"
+    );
+
+    // The existing working UKI must NOT have been overwritten!
+    let content = std::fs::read(&initial_uki).unwrap();
+    assert_eq!(
+        content, b"ORIGINAL-WORKING-IMAGE",
+        "Original UKI was overwritten despite backup failure!"
+    );
 }

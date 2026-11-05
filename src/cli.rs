@@ -48,7 +48,15 @@ pub enum Commands {
     /// Show current operational status, boot backend, and resolved settings.
     Status,
     /// Assess boot health and make the trial UKI the permanent default boot entry.
-    Confirm,
+    Confirm(ConfirmArgs),
+}
+
+/// Arguments for confirming a trial boot.
+#[derive(Debug, Clone, Args, Default)]
+pub struct ConfirmArgs {
+    /// Force confirmation even if system health is indeterminate (Unknown) or emergency mode.
+    #[arg(long)]
+    pub force: bool,
 }
 
 /// Shared override arguments for generation and installation actions.

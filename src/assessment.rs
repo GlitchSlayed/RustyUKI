@@ -40,27 +40,40 @@ pub fn assess_system_health(runner: &dyn CommandRunner) -> BootHealthStatus {
 
 /// Executes safe boot confirmation after verifying multi-stage system health.
 ///
-/// Refuses to promote the trial boot if system is in emergency mode
-/// or failed critical initialization targets.
+/// Automatic confirmation requires a verified healthy state (`running` or non-critical `degraded`).
+/// Refuses to confirm if system is in emergency mode or if health status is indeterminate (Unknown),
+/// preventing fail-open premature promotion.
+/// Manual confirmation can override indeterminate/degraded states via `force: true`.
 pub fn execute_safe_confirmation(
     runner: &dyn CommandRunner,
     backend: &dyn BootBackend,
+    force: bool,
 ) -> Result<String> {
     info!("Assessing system health prior to permanent boot confirmation...");
 
     let health = assess_system_health(runner);
     match health {
         BootHealthStatus::Emergency => {
-            bail!("Refusing to confirm boot: system is in emergency or rescue mode. Keep existing fallback boot order!");
+            if !force {
+                bail!("Refusing to confirm boot: system is in emergency or rescue mode. Keep existing fallback boot order!");
+            }
+            warn!("Forcing boot confirmation despite system being in emergency/rescue mode!");
+        }
+        BootHealthStatus::Unknown => {
+            if !force {
+                bail!(
+                    "Refusing automatic boot confirmation: system health is indeterminate (Unknown). \
+                    A verified operational system state ('systemctl is-system-running' == 'running') \
+                    is required before promoting a trial boot. Use 'rustyuki confirm --force' to override intentionally."
+                );
+            }
+            warn!("Forcing boot confirmation despite indeterminate system health (Unknown).");
         }
         BootHealthStatus::Degraded => {
-            warn!("Warning: system reached targets with degraded units; proceeding with cautious confirmation.");
+            warn!("Warning: system reached targets with degraded units; proceeding with confirmation.");
         }
         BootHealthStatus::Healthy => {
             info!("System health verified: systemd reported clean 'running' state.");
-        }
-        BootHealthStatus::Unknown => {
-            info!("System health assessment returned 'unknown'; proceeding with backend confirmation.");
         }
     }
 

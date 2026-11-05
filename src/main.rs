@@ -131,9 +131,9 @@ fn run() -> Result<()> {
             let text = status(&runner, &cfg)?;
             println!("{text}");
         }
-        Commands::Confirm => {
+        Commands::Confirm(args) => {
             require_root_if_live(false)?;
-            let boot_num = confirm_backend(&runner, cfg.bootloader.backend)?;
+            let boot_num = confirm_backend(&runner, cfg.bootloader.backend, args.force)?;
             println!("confirmed {boot_num} as the permanent default boot entry");
         }
     }

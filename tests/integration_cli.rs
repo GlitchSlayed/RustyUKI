@@ -800,7 +800,7 @@ Boot0007* Linux UKI 6.11.4-test	HD(...)
         },
     ]);
 
-    let boot_num = confirm(&runner).unwrap_or_else(|e| panic!("{e:#}"));
+    let boot_num = confirm(&runner, false).unwrap_or_else(|e| panic!("{e:#}"));
     assert_eq!(boot_num, "0007");
     runner.assert_no_pending();
 }
