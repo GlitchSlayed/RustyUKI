@@ -36,6 +36,7 @@ The documentation is organized into focused guides:
 
 | Guide | Description |
 |---|---|
+| [**Fedora Migration Guide**](./fedora-migration.md) | Step-by-step runbook for migrating existing Fedora installs, ESP expansion with Live USB, and trial boot validation. |
 | [**Architecture & Pipeline**](./architecture.md) | Three-stage decoupled pipeline (generation, installation, activation), FAT32 durability, and dual boot backends. |
 | [**CLI Reference**](./cli.md) | Exhaustive reference for all commands (`status`, `generate`, `install`, `activate`, `rollback`, `reconcile`, `confirm`, `install-hook`). |
 | [**Configuration Guide**](./configuration.md) | Detailed documentation of `/etc/rustyuki/config.toml`, backend selection, Secure Boot signing, and cmdline preservation. |

@@ -120,6 +120,7 @@ Full in-depth documentation is available in the [`docs/`](./docs/) directory:
 
 | Guide | Description |
 |---|---|
+| [**Fedora Migration Guide**](./docs/fedora-migration.md) | Step-by-step instructions for existing Fedora installs: Live USB ESP expansion, cmdline setup, and safe trial booting. |
 | [**Architecture & Pipeline**](./docs/architecture.md) | Three-stage decoupled pipeline, FAT32 durability, and dual boot backends. |
 | [**CLI Reference**](./docs/cli.md) | Exhaustive reference for all subcommands, options, and exit codes. |
 | [**Configuration Guide**](./docs/configuration.md) | `/etc/rustyuki/config.toml` schema, Secure Boot signing, and backend selection. |
@@ -210,6 +211,10 @@ key_path = "/etc/pki/sb/db.key"
 ---
 
 ## Safe First Boot Workflow
+
+> [!TIP]
+> **Migrating an existing Fedora machine?**
+> Standard Fedora installations usually have a 200–600 MiB ESP partition that is too small for multiple UKIs. Follow the complete [**Fedora Migration Guide**](./docs/fedora-migration.md) for step-by-step instructions on expanding your ESP using a Live USB before installing.
 
 1. **Check Environment Status**:
    ```bash
