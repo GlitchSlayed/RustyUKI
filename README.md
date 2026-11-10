@@ -214,7 +214,7 @@ key_path = "/etc/pki/sb/db.key"
 
 > [!TIP]
 > **Migrating an existing Fedora machine?**
-> Standard Fedora installations usually have a 200–600 MiB ESP partition that is too small for multiple UKIs. Follow the complete [**Fedora Migration Guide**](./docs/fedora-migration.md) for step-by-step instructions on expanding your ESP using a Live USB before installing.
+> Standard Fedora installations provision a 200–600 MiB ESP partition that is too small for multiple UKIs. Follow the complete [**Fedora Migration Guide**](./docs/fedora-migration.md) for step-by-step instructions on expanding your ESP to **4.0 GiB** using a Live USB, and choosing between the **Direct UEFI** and **systemd-boot** backends.
 
 1. **Check Environment Status**:
    ```bash
