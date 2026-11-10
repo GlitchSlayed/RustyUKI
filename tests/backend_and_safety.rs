@@ -86,10 +86,7 @@ fn test_systemd_boot_backend_activation() {
         },
         MockCall {
             program: "bootctl".to_string(),
-            args: vec![
-                "set-timeout-oneshot".to_string(),
-                "3".to_string(),
-            ],
+            args: vec!["set-timeout-oneshot".to_string(), "3".to_string()],
             output: Ok(ProcessOutput::default()),
         },
         MockCall {
