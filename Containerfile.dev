@@ -3,7 +3,9 @@ FROM registry.fedoraproject.org/fedora:45
 RUN dnf install -y \
     bash \
     cargo \
+    clippy \
     rust \
+    rustfmt \
     gcc \
     coreutils \
     diffutils \

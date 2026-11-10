@@ -86,6 +86,14 @@ fn test_systemd_boot_backend_activation() {
         },
         MockCall {
             program: "bootctl".to_string(),
+            args: vec![
+                "set-timeout-oneshot".to_string(),
+                "3".to_string(),
+            ],
+            output: Ok(ProcessOutput::default()),
+        },
+        MockCall {
+            program: "bootctl".to_string(),
             args: vec!["update".to_string()],
             output: Ok(ProcessOutput::default()),
         },
@@ -284,6 +292,11 @@ fn test_boot_assessment_allows_healthy_mode() {
         MockCall {
             program: "bootctl".to_string(),
             args: vec!["set-oneshot".to_string(), "".to_string()],
+            output: Ok(ProcessOutput::default()),
+        },
+        MockCall {
+            program: "bootctl".to_string(),
+            args: vec!["set-timeout-oneshot".to_string(), "".to_string()],
             output: Ok(ProcessOutput::default()),
         },
     ]);

@@ -17,12 +17,28 @@ import tempfile
 import time
 import urllib.request
 from pathlib import Path
+from typing import Optional
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MANIFEST_PATH = REPO_ROOT / "scripts" / "fedora_image_manifest.json"
 
-DEFAULT_OVMF_CODE = Path("/usr/share/OVMF/OVMF_CODE.fd")
-DEFAULT_OVMF_VARS = Path("/usr/share/OVMF/OVMF_VARS.fd")
+OVMF_CANDIDATE_PAIRS = [
+    (Path("/usr/share/OVMF/OVMF_CODE_4M.fd"), Path("/usr/share/OVMF/OVMF_VARS_4M.fd")),
+    (Path("/usr/share/OVMF/OVMF_CODE.fd"), Path("/usr/share/OVMF/OVMF_VARS.fd")),
+    (Path("/usr/share/edk2/ovmf/OVMF_CODE.fd"), Path("/usr/share/edk2/ovmf/OVMF_VARS.fd")),
+    (Path("/usr/share/edk2/OVMF_CODE.fd"), Path("/usr/share/edk2/OVMF_VARS.fd")),
+    (Path("/usr/share/edk2-ovmf/x64/OVMF_CODE.fd"), Path("/usr/share/edk2-ovmf/x64/OVMF_VARS.fd")),
+]
+
+
+def resolve_default_ovmf() -> tuple[Path, Path]:
+    for code, vars_path in OVMF_CANDIDATE_PAIRS:
+        if code.exists() and vars_path.exists():
+            return code, vars_path
+    return OVMF_CANDIDATE_PAIRS[0]
+
+
+DEFAULT_OVMF_CODE, DEFAULT_OVMF_VARS = resolve_default_ovmf()
 
 
 def log(msg: str):
@@ -122,7 +138,14 @@ def build_cidata_iso(out_iso: Path, user_data: str, meta_data: str, extra_files:
 
 
 class VMRunner:
-    def __init__(self, work_dir: Path, artifacts_dir: Path, accel: str = "auto"):
+    def __init__(
+        self,
+        work_dir: Path,
+        artifacts_dir: Path,
+        accel: str = "auto",
+        ovmf_code: Optional[Path] = None,
+        ovmf_vars: Optional[Path] = None,
+    ):
         self.work_dir = work_dir
         self.artifacts_dir = artifacts_dir
         self.work_dir.mkdir(parents=True, exist_ok=True)
@@ -142,8 +165,9 @@ class VMRunner:
             log("SKIP: qemu-system-x86_64 not found in PATH.")
             sys.exit(77)
 
-        self.ovmf_code = DEFAULT_OVMF_CODE
-        self.ovmf_vars = DEFAULT_OVMF_VARS
+        default_code, default_vars = resolve_default_ovmf()
+        self.ovmf_code = ovmf_code or default_code
+        self.ovmf_vars = ovmf_vars or default_vars
         if not self.ovmf_code.exists() or not self.ovmf_vars.exists():
             log(f"SKIP: OVMF firmware missing ({self.ovmf_code}, {self.ovmf_vars}).")
             sys.exit(77)
@@ -726,11 +750,19 @@ def main():
     parser.add_argument("--work-dir", type=Path, default=Path(tempfile.gettempdir()) / "rustyuki_vm_test", help="Working directory")
     parser.add_argument("--artifacts-dir", type=Path, default=REPO_ROOT / "artifacts" / "vm_logs", help="Directory for exported test logs")
     parser.add_argument("--accel", choices=["auto", "kvm", "tcg"], default="auto", help="Virtualization acceleration")
+    parser.add_argument("--ovmf-code", type=Path, default=None, help="Path to OVMF_CODE firmware")
+    parser.add_argument("--ovmf-vars", type=Path, default=None, help="Path to OVMF_VARS template")
     args = parser.parse_args()
 
     log(f"Starting Fedora VM Integration Tests (Release: {args.release}, Scenario: {args.scenario})")
 
-    vm = VMRunner(args.work_dir, args.artifacts_dir, accel=args.accel)
+    vm = VMRunner(
+        args.work_dir,
+        args.artifacts_dir,
+        accel=args.accel,
+        ovmf_code=args.ovmf_code,
+        ovmf_vars=args.ovmf_vars,
+    )
 
     # Resolve required base image
     generic_key = f"fedora-{args.release}-generic"

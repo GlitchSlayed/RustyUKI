@@ -119,9 +119,7 @@ impl BootBackend for DirectUefiBackend {
                 .and_then(|n| n.to_str())
                 .unwrap_or("");
             if !part_num.is_empty() && file_name.ends_with(&part_num) {
-                let trimmed = file_name
-                    .trim_end_matches(&part_num)
-                    .trim_end_matches('p');
+                let trimmed = file_name.trim_end_matches(&part_num).trim_end_matches('p');
                 if !trimmed.is_empty() {
                     disk = trimmed.to_string();
                 }

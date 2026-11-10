@@ -2,7 +2,10 @@ use anyhow::{anyhow, Result};
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use tempfile::TempDir;
+
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn test_esp_mountpoint() -> PathBuf {
     for candidate in ["/dev/shm", "/tmp", "/"] {
@@ -398,6 +401,7 @@ fn prune_removes_only_unknown_kernel_efis() {
 
 #[test]
 fn generate_with_boot_once_sets_bootnext_immediately() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = TempDir::new().unwrap_or_else(|e| panic!("{e}"));
     let esp = test_esp_mountpoint();
     let out = esp.join("EFI/Linux");
@@ -563,10 +567,13 @@ Boot0008* Linux UKI 6.11.5-test	HD(...)
     std::fs::remove_file(&final_out).ok();
     std::fs::remove_file(kernel_dir.join("vmlinuz")).ok();
     std::fs::remove_dir(kernel_dir).ok();
+    std::env::remove_var("RUSTYUKI_MODULES_DIR");
+    std::env::remove_var("RUSTYUKI_SYSTEMD_UNIT_PATH");
 }
 
 #[test]
 fn install_sets_bootnext_after_bootctl_update() {
+    let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = TempDir::new().unwrap_or_else(|e| panic!("{e}"));
     let esp = test_esp_mountpoint();
     let out = esp.join("EFI/Linux");
@@ -586,7 +593,10 @@ fn install_sets_bootnext_after_bootctl_update() {
     std::fs::create_dir_all(&kernel_dir).unwrap_or_else(|e| panic!("{e}"));
     std::fs::write(kernel_dir.join("vmlinuz"), b"kernel").unwrap_or_else(|e| panic!("{e}"));
     std::env::set_var("RUSTYUKI_MODULES_DIR", &modules_dir);
-    std::env::set_var("RUSTYUKI_SYSTEMD_UNIT_PATH", temp.path().join("rustyuki-boot-confirm.service"));
+    std::env::set_var(
+        "RUSTYUKI_SYSTEMD_UNIT_PATH",
+        temp.path().join("rustyuki-boot-confirm.service"),
+    );
 
     let expected_temp_out = PathBuf::from("/tmp/rustyuki-staging/.linux-6.11.4-test.efi.tmp");
     let final_out = out.join("linux-6.11.4-test.efi");
@@ -765,6 +775,8 @@ Boot0007* Linux UKI 6.11.4-test	HD(...)
     std::fs::remove_file(&final_out).ok();
     std::fs::remove_file(kernel_dir.join("vmlinuz")).ok();
     std::fs::remove_dir(kernel_dir).ok();
+    std::env::remove_var("RUSTYUKI_MODULES_DIR");
+    std::env::remove_var("RUSTYUKI_SYSTEMD_UNIT_PATH");
 }
 
 #[test]

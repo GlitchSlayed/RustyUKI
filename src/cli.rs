@@ -113,7 +113,6 @@ pub struct RollbackArgs {
     pub kernel_version: Option<String>,
 }
 
-
 /// Options for installing the kernel-install hook.
 #[derive(Debug, Clone, Parser)]
 pub struct InstallHookArgs {

@@ -44,6 +44,7 @@ fi
 # Locate OVMF firmware images
 OVMF_CODE=""
 for candidate in \
+    "/usr/share/OVMF/OVMF_CODE_4M.fd" \
     "/usr/share/OVMF/OVMF_CODE.fd" \
     "/usr/share/edk2/ovmf/OVMF_CODE.fd" \
     "/usr/share/edk2/OVMF_CODE.fd"; do
@@ -55,6 +56,7 @@ done
 
 OVMF_VARS=""
 for candidate in \
+    "/usr/share/OVMF/OVMF_VARS_4M.fd" \
     "/usr/share/OVMF/OVMF_VARS.fd" \
     "/usr/share/edk2/ovmf/OVMF_VARS.fd" \
     "/usr/share/edk2/OVMF_VARS.fd"; do

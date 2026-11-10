@@ -61,6 +61,11 @@ impl BootBackend for SystemdBootBackend {
                 .run("bootctl", &["set-oneshot", &entry_name])
                 .with_context(|| format!("failed setting one-shot trial entry to {entry_name}"))?;
 
+            info!("Configuring systemd-boot 3-second one-shot timeout for trial boot");
+            if let Err(e) = runner.run("bootctl", &["set-timeout-oneshot", "3"]) {
+                log::debug!("Could not set one-shot timeout for systemd-boot trial: {e:#}");
+            }
+
             Ok(ActivationResult {
                 backend: BootBackendType::SystemdBoot,
                 entry_id: Some(entry_name.clone()),
@@ -105,6 +110,9 @@ impl BootBackend for SystemdBootBackend {
         runner
             .run("bootctl", &["set-oneshot", ""])
             .context("failed clearing lingering oneshot trial entry via bootctl")?;
+
+        // Clear any lingering one-shot timeout
+        let _ = runner.run("bootctl", &["set-timeout-oneshot", ""]);
 
         let summary = output
             .stdout
