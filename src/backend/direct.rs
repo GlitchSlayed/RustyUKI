@@ -80,23 +80,62 @@ impl BootBackend for DirectUefiBackend {
             );
         }
 
-        let disk = runner
+        let mut disk = runner
             .run("lsblk", &["-no", "PKNAME", &source])
-            .context("failed determining parent disk")?
-            .stdout
-            .trim()
-            .to_string();
+            .map(|o| o.stdout.trim().to_string())
+            .unwrap_or_default();
+
+        let mut part_num = runner
+            .run("lsblk", &["-no", "PARTNUM", &source])
+            .map(|o| o.stdout.trim().to_string())
+            .unwrap_or_default();
+
+        if part_num.is_empty() {
+            part_num = runner
+                .run("lsblk", &["-no", "PARTN", &source])
+                .map(|o| o.stdout.trim().to_string())
+                .unwrap_or_default();
+        }
+
+        // Fallback: extract trailing partition digits from device node (e.g. /dev/sdb1 -> 1, /dev/nvme0n1p1 -> 1)
+        if part_num.is_empty() {
+            let file_name = Path::new(&source)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            let digits: String = file_name
+                .chars()
+                .rev()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if !digits.is_empty() {
+                part_num = digits.chars().rev().collect();
+            }
+        }
+
+        if disk.is_empty() {
+            let file_name = Path::new(&source)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("");
+            if !part_num.is_empty() && file_name.ends_with(&part_num) {
+                let trimmed = file_name
+                    .trim_end_matches(&part_num)
+                    .trim_end_matches('p');
+                if !trimmed.is_empty() {
+                    disk = trimmed.to_string();
+                }
+            } else {
+                disk = file_name.to_string();
+                if part_num.is_empty() {
+                    part_num = "1".to_string();
+                }
+            }
+        }
 
         if disk.is_empty() {
             bail!("failed to resolve parent disk for {source}");
         }
-
-        let part_num = runner
-            .run("lsblk", &["-no", "PARTNUM", &source])
-            .context("failed determining ESP partition number")?
-            .stdout
-            .trim()
-            .to_string();
 
         if part_num.is_empty() {
             bail!("failed to resolve partition number for {source}");
@@ -217,7 +256,12 @@ impl BootBackend for DirectUefiBackend {
         let mut diags = Vec::new();
 
         // 1. Check efibootmgr availability
-        if runner.run("which", &["efibootmgr"]).is_ok() {
+        let efibootmgr_available = runner.run("which", &["efibootmgr"]).is_ok()
+            || runner.run("efibootmgr", &["--version"]).is_ok()
+            || Path::new("/usr/sbin/efibootmgr").exists()
+            || Path::new("/usr/bin/efibootmgr").exists();
+
+        if efibootmgr_available {
             diags.push(BackendDiagnostic {
                 level: DiagnosticLevel::Ok,
                 title: "efibootmgr CLI Available".to_string(),

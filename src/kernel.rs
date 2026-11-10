@@ -25,7 +25,11 @@ pub fn discover_installed_kernels(
     let mut candidates = Vec::new();
 
     let root = sysroot.unwrap_or_else(|| Path::new("/"));
-    let module_roots = [root.join("usr/lib/modules"), root.join("lib/modules")];
+    let module_roots = if let Ok(custom) = std::env::var("RUSTYUKI_MODULES_DIR") {
+        vec![PathBuf::from(custom)]
+    } else {
+        vec![root.join("usr/lib/modules"), root.join("lib/modules")]
+    };
 
     for module_root in &module_roots {
         if !module_root.is_dir() {
@@ -151,6 +155,19 @@ pub fn resolve_target_kernel(
     sysroot: Option<&Path>,
 ) -> Result<KernelInfo> {
     if let Some(target) = explicit_version {
+        if let Ok(custom) = std::env::var("RUSTYUKI_MODULES_DIR") {
+            let custom_mod = Path::new(&custom).join(target);
+            if custom_mod.join("vmlinuz").is_file() {
+                return Ok(KernelInfo {
+                    version: target.to_string(),
+                    flavor: detect_flavor(target, None),
+                    vmlinuz_path: custom_mod.join("vmlinuz"),
+                    modules_dir: custom_mod,
+                    package_name: None,
+                });
+            }
+        }
+
         let root = sysroot.unwrap_or_else(|| Path::new("/"));
         let usr_mod = root.join("usr/lib/modules").join(target);
         let lib_mod = root.join("lib/modules").join(target);

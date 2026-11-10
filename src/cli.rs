@@ -15,7 +15,7 @@ pub struct Cli {
     pub dry_run: bool,
 
     /// Path to config file.
-    #[arg(long, global = true, default_value = "/etc/uki/uki.conf")]
+    #[arg(long, global = true, default_value = "/etc/rustyuki/config.toml")]
     pub config: PathBuf,
 
     /// Target root directory for offline installation or image-building.
@@ -63,7 +63,7 @@ pub struct ConfirmArgs {
 #[derive(Debug, Clone, Args, Default)]
 pub struct GenerateArgs {
     /// Target kernel version override.
-    #[arg(long)]
+    #[arg(long, short = 'k', alias = "kernel")]
     pub kernel_version: Option<String>,
     /// ESP mount path override.
     #[arg(long)]
@@ -95,7 +95,7 @@ pub struct GenerateArgs {
 #[derive(Debug, Clone, Args)]
 pub struct ActivateArgs {
     /// Target kernel version to activate. Defaults to latest installed.
-    #[arg(long)]
+    #[arg(long, short = 'k', alias = "kernel")]
     pub kernel_version: Option<String>,
     /// One-time trial boot flag.
     #[arg(long)]
@@ -109,9 +109,10 @@ pub struct ActivateArgs {
 #[derive(Debug, Clone, Args)]
 pub struct RollbackArgs {
     /// Kernel version to roll back. Defaults to running or latest installed kernel.
-    #[arg(long)]
+    #[arg(long, short = 'k', alias = "kernel")]
     pub kernel_version: Option<String>,
 }
+
 
 /// Options for installing the kernel-install hook.
 #[derive(Debug, Clone, Parser)]

@@ -11,7 +11,7 @@ use crate::install::{
 };
 use crate::kernel::{discover_installed_kernels, resolve_target_kernel};
 use crate::model::{BootBackendType, KernelInfo};
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use log::{info, warn};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -168,7 +168,9 @@ pub fn install(
     if !is_offline {
         let current_exe =
             std::env::current_exe().unwrap_or_else(|_| PathBuf::from("/usr/local/bin/rustyuki"));
-        let unit_path = PathBuf::from("/etc/systemd/system/rustyuki-boot-confirm.service");
+        let unit_path = std::env::var("RUSTYUKI_SYSTEMD_UNIT_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/etc/systemd/system/rustyuki-boot-confirm.service"));
         if let Some(parent) = unit_path.parent() {
             let _ = fs::create_dir_all(parent);
         }
@@ -379,12 +381,10 @@ fn discoverable_root_advisory(
         return Ok(None);
     }
 
-    let parttype = runner
-        .run("lsblk", &["-no", "PARTTYPE", &root_device])
-        .context("failed determining root partition GPT type GUID")?
-        .stdout
-        .trim()
-        .to_ascii_lowercase();
+    let Ok(parttype_out) = runner.run("lsblk", &["-no", "PARTTYPE", &root_device]) else {
+        return Ok(None);
+    };
+    let parttype = parttype_out.stdout.trim().to_ascii_lowercase();
 
     Ok(discoverable_root_message(
         has_root,

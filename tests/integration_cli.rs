@@ -216,7 +216,7 @@ fn build_uki_creates_temp_file_then_atomically_renames() {
             "--cmdline".to_string(),
             "root=UUID=abcd rw quiet".to_string(),
             "--os-release".to_string(),
-            os_release.display().to_string(),
+            format!("@{}", os_release.display()),
             "--output".to_string(),
             expected_temp_out.display().to_string(),
             "--splash".to_string(),
@@ -281,7 +281,7 @@ fn build_uki_cleans_temp_file_on_command_failure() {
             "--cmdline".to_string(),
             "quiet".to_string(),
             "--os-release".to_string(),
-            os_release.display().to_string(),
+            format!("@{}", os_release.display()),
             "--output".to_string(),
             expected_temp_out.display().to_string(),
         ],
@@ -412,9 +412,11 @@ fn generate_with_boot_once_sets_bootnext_immediately() {
     )
     .unwrap_or_else(|e| panic!("{e}"));
 
-    let kernel_dir = PathBuf::from("/lib/modules/6.11.5-test");
+    let modules_dir = temp.path().join("modules");
+    let kernel_dir = modules_dir.join("6.11.5-test");
     std::fs::create_dir_all(&kernel_dir).unwrap_or_else(|e| panic!("{e}"));
     std::fs::write(kernel_dir.join("vmlinuz"), b"kernel").unwrap_or_else(|e| panic!("{e}"));
+    std::env::set_var("RUSTYUKI_MODULES_DIR", &modules_dir);
 
     let expected_temp_out = PathBuf::from("/tmp/rustyuki-staging/.linux-6.11.5-test.efi.tmp");
     let final_out = out.join("linux-6.11.5-test.efi");
@@ -440,7 +442,7 @@ fn generate_with_boot_once_sets_bootnext_immediately() {
                 "--cmdline".to_string(),
                 "root=/dev/test rw quiet".to_string(),
                 "--os-release".to_string(),
-                os_release.display().to_string(),
+                format!("@{}", os_release.display()),
                 "--output".to_string(),
                 expected_temp_out.display().to_string(),
             ],
@@ -579,9 +581,12 @@ fn install_sets_bootnext_after_bootctl_update() {
     )
     .unwrap_or_else(|e| panic!("{e}"));
 
-    let kernel_dir = PathBuf::from("/lib/modules/6.11.4-test");
+    let modules_dir = temp.path().join("modules");
+    let kernel_dir = modules_dir.join("6.11.4-test");
     std::fs::create_dir_all(&kernel_dir).unwrap_or_else(|e| panic!("{e}"));
     std::fs::write(kernel_dir.join("vmlinuz"), b"kernel").unwrap_or_else(|e| panic!("{e}"));
+    std::env::set_var("RUSTYUKI_MODULES_DIR", &modules_dir);
+    std::env::set_var("RUSTYUKI_SYSTEMD_UNIT_PATH", temp.path().join("rustyuki-boot-confirm.service"));
 
     let expected_temp_out = PathBuf::from("/tmp/rustyuki-staging/.linux-6.11.4-test.efi.tmp");
     let final_out = out.join("linux-6.11.4-test.efi");
@@ -620,7 +625,7 @@ fn install_sets_bootnext_after_bootctl_update() {
                 "--cmdline".to_string(),
                 "root=/dev/test rw quiet".to_string(),
                 "--os-release".to_string(),
-                os_release.display().to_string(),
+                format!("@{}", os_release.display()),
                 "--output".to_string(),
                 expected_temp_out.display().to_string(),
             ],

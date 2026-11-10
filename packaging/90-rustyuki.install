@@ -20,7 +20,7 @@ mkdir -p "${FAILURE_LOG_DIR}"
 case "${COMMAND}" in
     add)
         echo "rustyuki: generating unified kernel image for ${KERNEL_VER}..."
-        if ! "${RUSTYUKI_BIN}" --config "${CONFIG_FILE}" generate --kernel "${KERNEL_VER}"; then
+        if ! "${RUSTYUKI_BIN}" --config "${CONFIG_FILE}" generate --kernel-version "${KERNEL_VER}"; then
             echo "ERROR: rustyuki failed generating UKI for ${KERNEL_VER}" >&2
             echo "$(date -Iseconds): generate failed for ${KERNEL_VER}" > "${FAILURE_LOG_DIR}/${KERNEL_VER}.failed"
             # Do not abort package scriptlet with non-zero exit to avoid breaking RPM transactions,

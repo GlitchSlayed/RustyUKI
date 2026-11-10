@@ -32,8 +32,8 @@ splash = ""
 # Path to os-release file
 os_release = "/usr/lib/os-release"
 
-# Target sysroot for offline image building (empty = live host "/")
-sysroot = ""
+# Target sysroot for offline image building (leave commented out for live host)
+# sysroot = "/mnt/target"
 
 [dracut]
 # Extra arguments passed to dracut during stage 1 initramfs creation

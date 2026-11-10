@@ -124,16 +124,29 @@ pub struct SigningConfig {
 }
 
 impl AppConfig {
-    /// Loads TOML configuration from a file. If the file is missing, defaults are returned.
+    /// Loads TOML configuration from a file. If the file is missing, searches default locations or returns defaults.
     pub fn load(path: &Path) -> Result<Self> {
-        if !path.exists() {
+        let actual_path = if path.exists() {
+            path.to_path_buf()
+        } else if Path::new("/etc/rustyuki/config.toml").exists() {
+            PathBuf::from("/etc/rustyuki/config.toml")
+        } else if Path::new("/etc/uki/uki.conf").exists() {
+            PathBuf::from("/etc/uki/uki.conf")
+        } else {
             return Ok(Self::default());
-        }
+        };
 
-        let text = fs::read_to_string(path)
-            .with_context(|| format!("failed reading config file {}", path.display()))?;
-        let parsed: Self = toml::from_str(&text)
-            .with_context(|| format!("failed parsing TOML config {}", path.display()))?;
+        let text = fs::read_to_string(&actual_path)
+            .with_context(|| format!("failed reading config file {}", actual_path.display()))?;
+        let mut parsed: Self = toml::from_str(&text)
+            .with_context(|| format!("failed parsing TOML config {}", actual_path.display()))?;
+
+        // Normalize empty sysroot ("" or "/") to None so it is not mistaken for an offline sysroot
+        if let Some(sysroot) = &parsed.uki.sysroot {
+            if sysroot.as_os_str().is_empty() || sysroot == Path::new("/") {
+                parsed.uki.sysroot = None;
+            }
+        }
         Ok(parsed)
     }
 

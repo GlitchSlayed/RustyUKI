@@ -70,7 +70,11 @@ pub fn assemble_uki(runner: &dyn CommandRunner, params: &UkifyParams<'_>) -> Res
         "--cmdline".to_string(),
         params.cmdline.to_string(),
         "--os-release".to_string(),
-        os_release.to_string(),
+        if os_release.starts_with('@') {
+            os_release.to_string()
+        } else {
+            format!("@{os_release}")
+        },
         "--output".to_string(),
         temp_out.to_string(),
     ];
